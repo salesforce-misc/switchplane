@@ -1,10 +1,10 @@
 .PHONY: test test-cov install-test lint static format formatcheck clean
 
 install-test:
-	uv pip install -e ".[test]" -e examples/hello -e examples/weather -e examples/joke -e examples/stream -e examples/devops
+	uv pip install -e ".[test]"
 
 install-examples:
-	uv pip install -e examples/hello -e examples/weather -e examples/joke -e examples/stream -e examples/devops
+	uv pip install -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot
 
 test:
 	pytest tests/ -v -n auto
@@ -23,7 +23,6 @@ static:
 
 format:
 	ruff format src/ tests/ examples/
-	ruff check --fix src/ tests/ examples/
 
 formatcheck:
 	ruff format --check src/ tests/ examples/

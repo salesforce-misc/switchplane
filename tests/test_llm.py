@@ -13,7 +13,6 @@ from switchplane.llm import (
     context_window,
 )
 
-
 # ---------------------------------------------------------------------------
 # ModelInfo / MODELS registry
 # ---------------------------------------------------------------------------
@@ -143,9 +142,11 @@ class TestBuildLlmAnthropic:
         assert "anthropic_api_url" not in kwargs
 
     def test_import_error_raises_with_hint(self):
-        with patch.dict(sys.modules, {"langchain_anthropic": None}):
-            with pytest.raises(ImportError, match="langchain-anthropic"):
-                build_llm("claude-sonnet-4-20250514")
+        with (
+            patch.dict(sys.modules, {"langchain_anthropic": None}),
+            pytest.raises(ImportError, match="langchain-anthropic"),
+        ):
+            build_llm("claude-sonnet-4-20250514")
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +190,11 @@ class TestBuildLlmGemini:
         assert "base_url" not in kwargs
 
     def test_import_error_raises_with_hint(self):
-        with patch.dict(sys.modules, {"langchain_google_genai": None}):
-            with pytest.raises(ImportError, match="langchain-google-genai"):
-                build_llm("gemini-2.0-flash")
+        with (
+            patch.dict(sys.modules, {"langchain_google_genai": None}),
+            pytest.raises(ImportError, match="langchain-google-genai"),
+        ):
+            build_llm("gemini-2.0-flash")
 
     def test_import_error_when_not_installed(self):
         # langchain_google_genai is not installed in this environment —
@@ -252,16 +255,17 @@ class TestBuildLlmOpenAI:
         assert "base_url" not in kwargs
 
     def test_import_error_raises_with_hint(self):
-        with patch.dict(sys.modules, {"langchain_openai": None}):
-            with pytest.raises(ImportError, match="langchain-openai"):
-                build_llm("gpt-4o")
+        with patch.dict(sys.modules, {"langchain_openai": None}), pytest.raises(ImportError, match="langchain-openai"):
+            build_llm("gpt-4o")
 
     def test_import_error_when_not_installed(self):
         saved = sys.modules.pop("langchain_openai", None)
         try:
-            with patch.dict(sys.modules, {"langchain_openai": None}):
-                with pytest.raises(ImportError, match="langchain-openai"):
-                    build_llm("gpt-4o")
+            with (
+                patch.dict(sys.modules, {"langchain_openai": None}),
+                pytest.raises(ImportError, match="langchain-openai"),
+            ):
+                build_llm("gpt-4o")
         finally:
             if saved is not None:
                 sys.modules["langchain_openai"] = saved

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import structlog
 
-
 _SKIP_FIELDS = frozenset({"event", "level", "logger", "timestamp", "_logger", "_name", "_record"})
 
 

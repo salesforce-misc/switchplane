@@ -38,6 +38,7 @@ class _IPCLogHandler(_logging.Handler):
         self._ctx = ctx
         self.addFilter(self._no_recursion)
         from switchplane.logging import StreamMessageFormatter
+
         self.setFormatter(StreamMessageFormatter())
 
     @staticmethod
@@ -46,11 +47,14 @@ class _IPCLogHandler(_logging.Handler):
 
     def emit(self, record: _logging.LogRecord) -> None:
         try:
-            self._ctx.emit("log", {
-                "message": self.format(record),
-                "level": record.levelname.lower(),
-                "logger": record.name,
-            })
+            self._ctx.emit(
+                "log",
+                {
+                    "message": self.format(record),
+                    "level": record.levelname.lower(),
+                    "logger": record.name,
+                },
+            )
         except Exception:
             pass  # never let logging failures crash the agent
 
@@ -317,7 +321,11 @@ async def _listen_for_commands(
     try:
         while True:
             data = await _read_message(reader)
-            command = AgentCommand.model_validate_json(data)
+            try:
+                command = AgentCommand.model_validate_json(data)
+            except Exception:
+                _logger.warning("malformed_command", data=data[:200])
+                continue
 
             match command.type:
                 case "cancel":
@@ -452,7 +460,11 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
     os.close(ipc_fd)  # fromfd duped the fd
 
     # Wrap for async reading (commands from CP)
-    reader, _writer = await asyncio.open_connection(sock=sock)
+    try:
+        reader, _writer = await asyncio.open_connection(sock=sock)
+    except Exception:
+        sock.close()
+        raise
 
     # Read the initial command
     try:

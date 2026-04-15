@@ -129,8 +129,6 @@ class TestAgentContextFail:
         assert event.payload["traceback"] == "Traceback:\n  File..."
 
 
-
-
 class TestAgentContextCancellation:
     def test_not_cancelled_initially(self, ctx):
         assert ctx.is_cancelled is False
@@ -453,7 +451,7 @@ class TestWaitForInput:
         """Non-__input__ commands are dispatched to the task while waiting."""
         from unittest.mock import AsyncMock, MagicMock
 
-        cp_sock, agent_sock = socketpair
+        _cp_sock, agent_sock = socketpair
         ctx = AgentContext(
             task_id="t1",
             task_name="test",

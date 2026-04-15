@@ -184,7 +184,9 @@ def build_cli(app) -> click.Group:
                     except Exception:
                         pass  # Tokens are stored by the auth flow regardless of response.
 
-            click.echo(f"Authenticated with '{server_name}'. Tokens stored in {app.runtime_dir / 'oauth' / config.oauth_storage_key}/")
+            click.echo(
+                f"Authenticated with '{server_name}'. Tokens stored in {app.runtime_dir / 'oauth' / config.oauth_storage_key}/"
+            )
 
         try:
             asyncio.run(_run_auth())
@@ -350,7 +352,9 @@ def build_cli(app) -> click.Group:
         """Purge all terminal tasks: database records, data files, and logs."""
         ensure_daemon()
         if not yes:
-            click.confirm("This will delete all completed, failed, and cancelled tasks and their data. Continue?", abort=True)
+            click.confirm(
+                "This will delete all completed, failed, and cancelled tasks and their data. Continue?", abort=True
+            )
         resp = send_request("purge_tasks")
         if resp.ok:
             count = resp.result.get("purged", 0)

@@ -17,11 +17,11 @@ from switchplane.app import Application
 from switchplane.checkpoint import SqliteCheckpointSaver
 from switchplane.config import AppConfig, load_config
 from switchplane.daemon import IDLE_TIMEOUT, IdleTimer, RuntimePaths
+from switchplane.logging import StreamMessageFormatter
 from switchplane.persistence import Store
 from switchplane.protocol import CliRequest, CliResponse, StreamEvent
 from switchplane.subprocess_manager import SubprocessManager
 from switchplane.task import TaskRecord, TaskStatus
-from switchplane.logging import StreamMessageFormatter
 from switchplane.transport import SocketServer, write_message
 
 logger = structlog.get_logger()
@@ -284,13 +284,15 @@ class ControlPlane:
         logger_name = record.name
         level = record.levelname.lower()
         self._system_log_seq += 1
-        self._system_log_buffer.append({
-            "message": message,
-            "level": level,
-            "logger": logger_name,
-            "ts": ts.isoformat(),
-            "seq": self._system_log_seq,
-        })
+        self._system_log_buffer.append(
+            {
+                "message": message,
+                "level": level,
+                "logger": logger_name,
+                "ts": ts.isoformat(),
+                "seq": self._system_log_seq,
+            }
+        )
 
         if not self._system_log_subscribers:
             return

@@ -22,10 +22,9 @@ import numpy as np
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
 
-from switchplane import Field, Task
+from switchplane import Task
 from switchplane.agent_runtime import AgentContext
 from switchplane.llm import build_llm
-
 
 # -- Mock data generation ------------------------------------------------------
 #
@@ -105,15 +104,17 @@ def _generate_week(
                     continue
 
                 lat = _LATENCY_MS[endpoint]
-                rows.append({
-                    "timestamp": ts,
-                    "endpoint": endpoint,
-                    "status_code": code,
-                    "count": count,
-                    "p50_ms": round(max(1.0, rng.normal(lat["p50"] * lat_mult, lat["p50"] * 0.10)), 1),
-                    "p95_ms": round(max(1.0, rng.normal(lat["p95"] * lat_mult, lat["p95"] * 0.12)), 1),
-                    "p99_ms": round(max(1.0, rng.normal(lat["p99"] * lat_mult, lat["p99"] * 0.15)), 1),
-                })
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "endpoint": endpoint,
+                        "status_code": code,
+                        "count": count,
+                        "p50_ms": round(max(1.0, rng.normal(lat["p50"] * lat_mult, lat["p50"] * 0.10)), 1),
+                        "p95_ms": round(max(1.0, rng.normal(lat["p95"] * lat_mult, lat["p95"] * 0.12)), 1),
+                        "p99_ms": round(max(1.0, rng.normal(lat["p99"] * lat_mult, lat["p99"] * 0.15)), 1),
+                    }
+                )
 
     return pd.DataFrame(rows)
 
@@ -122,7 +123,7 @@ def generate_metrics() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate current + previous week. Current week has injected anomalies."""
     rng = np.random.default_rng(42)
 
-    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    now = datetime.datetime.now(tz=datetime.UTC)
     monday = now - datetime.timedelta(days=now.weekday(), hours=now.hour, minutes=now.minute, seconds=now.second)
     prev_monday = monday - datetime.timedelta(weeks=1)
 
@@ -140,6 +141,7 @@ def generate_metrics() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 # -- Analysis (deterministic — pandas, zero LLM calls) ------------------------
 
+
 def _spike_windows(df: pd.DataFrame, group_col: str, z_threshold: float = 2.5) -> list[dict]:
     """Detect hourly windows that deviate >z_threshold stddevs from the weekly mean."""
     df = df.copy()
@@ -154,12 +156,14 @@ def _spike_windows(df: pd.DataFrame, group_col: str, z_threshold: float = 2.5) -
             continue
         z = (group_df["count"] - mu) / sigma
         for _, row in group_df[z > z_threshold].iterrows():
-            spikes.append({
-                "group": group_val,
-                "timestamp": row["hour"].isoformat(),
-                "value": int(row["count"]),
-                "z_score": round(float((row["count"] - mu) / sigma), 1),
-            })
+            spikes.append(
+                {
+                    "group": group_val,
+                    "timestamp": row["hour"].isoformat(),
+                    "value": int(row["count"]),
+                    "z_score": round(float((row["count"] - mu) / sigma), 1),
+                }
+            )
 
     return sorted(spikes, key=lambda x: -x["z_score"])
 
@@ -175,9 +179,7 @@ def analyze(current: pd.DataFrame, previous: pd.DataFrame) -> dict:
         ep: {
             "current": int(cur_vol.get(ep, 0)),
             "previous": int(prev_vol.get(ep, 0)),
-            "wow_pct": round(
-                (cur_vol.get(ep, 0) - prev_vol.get(ep, 0)) / max(prev_vol.get(ep, 1), 1) * 100, 1
-            ),
+            "wow_pct": round((cur_vol.get(ep, 0) - prev_vol.get(ep, 0)) / max(prev_vol.get(ep, 1), 1) * 100, 1),
         }
         for ep in ENDPOINTS
     }
@@ -224,8 +226,7 @@ def analyze(current: pd.DataFrame, previous: pd.DataFrame) -> dict:
                 "current": int(cur_by_code.get(c, 0)),
                 "previous": int(prev_by_code.get(c, 0)),
                 "wow_pct": round(
-                    (cur_by_code.get(c, 0) - prev_by_code.get(c, 0))
-                    / max(prev_by_code.get(c, 1), 1) * 100, 1
+                    (cur_by_code.get(c, 0) - prev_by_code.get(c, 0)) / max(prev_by_code.get(c, 1), 1) * 100, 1
                 ),
                 "share_pct": round(cur_by_code.get(c, 0) / grand_total * 100, 3),
             }
@@ -236,18 +237,15 @@ def analyze(current: pd.DataFrame, previous: pd.DataFrame) -> dict:
 
     # -- Spike detection (z-score anomaly detection) --
     analysis["spikes"] = {
-        "5xx_by_endpoint": _spike_windows(
-            current[current["status_code"].between(500, 599)], "endpoint"
-        ),
-        "4xx_by_endpoint": _spike_windows(
-            current[current["status_code"].between(400, 499)], "endpoint"
-        ),
+        "5xx_by_endpoint": _spike_windows(current[current["status_code"].between(500, 599)], "endpoint"),
+        "4xx_by_endpoint": _spike_windows(current[current["status_code"].between(400, 499)], "endpoint"),
     }
 
     return analysis
 
 
 # -- Report formatting (deterministic) ----------------------------------------
+
 
 def format_analysis(data: dict) -> str:
     """Format computed analysis into concise text for the LLM prompt."""
@@ -279,8 +277,7 @@ def format_analysis(data: dict) -> str:
         if row["current"] == 0 and row["previous"] == 0:
             continue
         lines.append(
-            f"  HTTP {row['code']}: {row['current']:,} "
-            f"({row['share_pct']:.3f}% share, {row['wow_pct']:+.1f}% WoW)"
+            f"  HTTP {row['code']}: {row['current']:,} ({row['share_pct']:.3f}% share, {row['wow_pct']:+.1f}% WoW)"
         )
     lines.append("")
 
@@ -336,9 +333,10 @@ def _strip_json_fences(text: str) -> str:
 
 # -- Graph state and nodes ----------------------------------------------------
 
+
 class ReviewState(TypedDict):
-    current: Any           # pd.DataFrame (not serializable, ephemeral task)
-    previous: Any          # pd.DataFrame
+    current: Any  # pd.DataFrame (not serializable, ephemeral task)
+    previous: Any  # pd.DataFrame
     analysis: dict | None
     formatted: str
     summary: dict | None
@@ -358,10 +356,12 @@ def _build_graph(llm) -> StateGraph:
 
     async def summarize(state: ReviewState) -> dict:
         prompt = _ANALYSIS_PROMPT.format(formatted_data=state["formatted"])
-        response = await llm.ainvoke([
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ])
+        response = await llm.ainvoke(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
         try:
             summary = json.loads(_strip_json_fences(response.content))
         except (json.JSONDecodeError, TypeError):
@@ -397,10 +397,10 @@ def _build_graph(llm) -> StateGraph:
         return {"report": "\n".join(lines)}
 
     graph = StateGraph(ReviewState)
-    graph.add_node("fetch_metrics", fetch_metrics)       # deterministic
-    graph.add_node("analyze_metrics", analyze_metrics)    # deterministic
-    graph.add_node("summarize", summarize)                # ← the ONE LLM call
-    graph.add_node("compile_report", compile_report)      # deterministic
+    graph.add_node("fetch_metrics", fetch_metrics)  # deterministic
+    graph.add_node("analyze_metrics", analyze_metrics)  # deterministic
+    graph.add_node("summarize", summarize)  # ← the ONE LLM call
+    graph.add_node("compile_report", compile_report)  # deterministic
 
     graph.add_edge(START, "fetch_metrics")
     graph.add_edge("fetch_metrics", "analyze_metrics")
@@ -412,6 +412,7 @@ def _build_graph(llm) -> StateGraph:
 
 
 # -- Task entry point ---------------------------------------------------------
+
 
 class ReviewTask(Task):
     name = "review"

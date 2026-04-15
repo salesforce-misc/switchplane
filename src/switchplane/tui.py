@@ -24,6 +24,7 @@ import struct
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
@@ -534,7 +535,8 @@ class TUISession:
                         self._append_text(self.focused_task_id, _S_ERROR, f"  > Error: {resp.error}")
                 else:
                     self._append_text(
-                        self.focused_task_id, _S_DIM,
+                        self.focused_task_id,
+                        _S_DIM,
                         "  Task is not waiting for input. Use /command for task commands.",
                     )
             else:
@@ -607,7 +609,7 @@ class TUISession:
             return
         sub = args[0].lower()
         rest = args[1:]
-        dispatch: dict[str, any] = {
+        dispatch: dict[str, Any] = {
             "follow": self._cmd_task_follow,
             "cancel": self._cmd_cancel,
             "clear": self._cmd_clear,
@@ -816,10 +818,12 @@ class TUISession:
     async def _cmd_task_purge(self, args: list[str] | None = None) -> None:
         """Purge all terminal tasks: database records, data files, and logs."""
         if not args or "--yes" not in args:
-            self._system_messages([
-                "This will delete all completed/failed/cancelled tasks and their data.",
-                "Run :task purge --yes to confirm.",
-            ])
+            self._system_messages(
+                [
+                    "This will delete all completed/failed/cancelled tasks and their data.",
+                    "Run :task purge --yes to confirm.",
+                ]
+            )
             return
         resp = await self._request("purge_tasks")
         if not resp.ok:
@@ -842,10 +846,7 @@ class TUISession:
         if not tasks:
             self._system_message("No tasks found.")
             return
-        self._system_messages([
-            f"  {t['task_id']}  {t['agent_name']}/{t['task_name']}  {t['status']}"
-            for t in tasks
-        ])
+        self._system_messages([f"  {t['task_id']}  {t['agent_name']}/{t['task_name']}  {t['status']}" for t in tasks])
 
     async def _cmd_status(self, _args: list[str] | None = None) -> None:
         resp = await self._request("status")
@@ -909,26 +910,28 @@ class TUISession:
                 self._append_text(tid, _S_INFO, f"    /{cmd_name}")
 
     def _cmd_help(self) -> None:
-        self._system_messages([
-            "  Daemon commands (prefix with :):",
-            "    :run <agent> <task> [--key value ...]  — start a task",
-            "    :task follow <task_id>                 — follow an existing task",
-            "    :task cancel [<task_id>]               — cancel focused or specified task",
-            "    :task clear                            — delete completed/failed/cancelled tasks",
-            "    :task purge --yes                      — purge terminal tasks, data files, and logs",
-            "    :task list [--status <s>]               — list all tasks (optionally filter by status)",
-            "    :task show <task_id>                   — show task details",
-            "    :task retry <task_id>                  — retry a failed/cancelled task from checkpoint",
-            "    :runtime status                        — show daemon status",
-            "    :agent list                            — list agents and their tasks",
-            "    :help                                  — show this help",
-            "  Task commands (prefix with /):",
-            "    /<command> [--key value ...]            — send command to focused task",
-            "    /help                                  — show focused task's available commands",
-            "  Plain text is reserved for future interactive LLM tasks.",
-            "  Keys: Tab/Shift+Tab switch tab · 0 system · 1-9 task",
-            "        PgUp/Dn scroll · Ctrl+X cancel · Ctrl+D detach · Ctrl+C quit",
-        ])
+        self._system_messages(
+            [
+                "  Daemon commands (prefix with :):",
+                "    :run <agent> <task> [--key value ...]  — start a task",
+                "    :task follow <task_id>                 — follow an existing task",
+                "    :task cancel [<task_id>]               — cancel focused or specified task",
+                "    :task clear                            — delete completed/failed/cancelled tasks",
+                "    :task purge --yes                      — purge terminal tasks, data files, and logs",
+                "    :task list [--status <s>]               — list all tasks (optionally filter by status)",
+                "    :task show <task_id>                   — show task details",
+                "    :task retry <task_id>                  — retry a failed/cancelled task from checkpoint",
+                "    :runtime status                        — show daemon status",
+                "    :agent list                            — list agents and their tasks",
+                "    :help                                  — show this help",
+                "  Task commands (prefix with /):",
+                "    /<command> [--key value ...]            — send command to focused task",
+                "    /help                                  — show focused task's available commands",
+                "  Plain text is reserved for future interactive LLM tasks.",
+                "  Keys: Tab/Shift+Tab switch tab · 0 system · 1-9 task",
+                "        PgUp/Dn scroll · Ctrl+X cancel · Ctrl+D detach · Ctrl+C quit",
+            ]
+        )
 
     # ------------------------------------------------------------------
     # FormattedText providers (called by prompt_toolkit on each render)
@@ -1096,7 +1099,6 @@ def build_tui_app(session: TUISession) -> Application:
         except Exception:
             rows = 20
         session.scroll_down(rows)
-
 
     @kb.add("c-x")
     def _cancel(event) -> None:
@@ -1311,7 +1313,7 @@ async def run_tui(
 
     # Start streams for all tasks so historical events are loaded into buffers.
     # The control plane replays stored events then sends stream.end for terminal tasks.
-    for task_id, buf in session.buffers.items():
+    for task_id in session.buffers:
         if task_id != _SYSTEM_TAB_ID:
             session.start_stream(task_id)
 

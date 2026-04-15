@@ -28,6 +28,7 @@ async def setup_tables(db: aiosqlite.Connection) -> None:
             type TEXT,
             checkpoint BLOB,
             metadata BLOB,
+            metadata_type TEXT,
             PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
         )
     """)
@@ -74,7 +75,7 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
             # Get specific checkpoint
             cursor = await self.db.execute(
                 """
-                SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+                SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type
                 FROM checkpoints
                 WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
             """,
@@ -84,7 +85,7 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
             # Get latest checkpoint
             cursor = await self.db.execute(
                 """
-                SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+                SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type
                 FROM checkpoints
                 WHERE thread_id = ? AND checkpoint_ns = ?
                 ORDER BY checkpoint_id DESC
@@ -97,11 +98,11 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
         if not row:
             return None
 
-        checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_blob = row
+        checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_blob, metadata_type = row
 
         # Deserialize checkpoint and metadata
         checkpoint = self.serde.loads_typed((checkpoint_type, checkpoint_blob)) if checkpoint_blob else {}
-        metadata = self.serde.loads_typed((checkpoint_type, metadata_blob)) if metadata_blob else {}
+        metadata = self.serde.loads_typed((metadata_type or checkpoint_type, metadata_blob)) if metadata_blob else {}
 
         # Query for pending writes
         writes_cursor = await self.db.execute(
@@ -155,12 +156,14 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
         limit: int = 10,
     ) -> AsyncIterator[CheckpointTuple]:
         """List checkpoints for a thread."""
+        if config is None:
+            return
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
         # Build query
         query = """
-            SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+            SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type
             FROM checkpoints
             WHERE thread_id = ? AND checkpoint_ns = ?
         """
@@ -180,11 +183,13 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
         rows = await cursor.fetchall()
 
         for row in rows:
-            checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_blob = row
+            checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_blob, metadata_type = row
 
             # Deserialize
             checkpoint = self.serde.loads_typed((checkpoint_type, checkpoint_blob)) if checkpoint_blob else {}
-            metadata = self.serde.loads_typed((checkpoint_type, metadata_blob)) if metadata_blob else {}
+            metadata = (
+                self.serde.loads_typed((metadata_type or checkpoint_type, metadata_blob)) if metadata_blob else {}
+            )
 
             # Apply filter if provided
             if filter and not all(metadata.get(k) == v for k, v in filter.items()):
@@ -250,14 +255,14 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
 
         # Serialize checkpoint and metadata
         checkpoint_type, checkpoint_blob = self.serde.dumps_typed(checkpoint)
-        _, metadata_blob = self.serde.dumps_typed(metadata)
+        metadata_type, metadata_blob = self.serde.dumps_typed(metadata)
 
         # Insert or replace checkpoint
         await self.db.execute(
             """
             INSERT OR REPLACE INTO checkpoints
-            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 thread_id,
@@ -267,6 +272,7 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
                 checkpoint_type,
                 checkpoint_blob,
                 metadata_blob,
+                metadata_type,
             ),
         )
 
@@ -294,15 +300,10 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
         checkpoint_id = config["configurable"]["checkpoint_id"]
 
         # Insert writes
+        rows = []
         for idx, (channel, value) in enumerate(writes):
             write_type, write_blob = self.serde.dumps_typed(value)
-
-            await self.db.execute(
-                """
-                INSERT OR REPLACE INTO checkpoint_writes
-                (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            rows.append(
                 (
                     thread_id,
                     checkpoint_ns,
@@ -312,8 +313,17 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
                     channel,
                     write_type,
                     write_blob,
-                ),
+                )
             )
+
+        await self.db.executemany(
+            """
+            INSERT OR REPLACE INTO checkpoint_writes
+            (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            rows,
+        )
 
         await self.db.commit()
 

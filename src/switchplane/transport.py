@@ -88,6 +88,7 @@ class SocketServer:
 
         try:
             while True:
+                request_id = "unknown"
                 try:
                     # Read message
                     message_bytes = await read_message(reader)
@@ -95,6 +96,7 @@ class SocketServer:
                     # Deserialize request
                     request_data = json.loads(message_bytes.decode("utf-8"))
                     request = CliRequest.model_validate(request_data)
+                    request_id = request.id
 
                     # subscribe_task upgrades this connection to a push stream
                     if request.method == "subscribe_task" and self.stream_handler:
@@ -122,7 +124,7 @@ class SocketServer:
                     break
                 except Exception as e:
                     # Send error response
-                    error_response = CliResponse(id="error", ok=False, error=str(e))
+                    error_response = CliResponse(id=request_id, ok=False, error=str(e))
                     response_bytes = json.dumps(error_response.model_dump()).encode("utf-8")
                     await write_message(writer, response_bytes)
 

@@ -6,7 +6,7 @@ user-level overrides from ~/.{app_name}/config.toml.
 
 import tomllib
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -40,14 +40,11 @@ class AppConfig(BaseModel):
     agents: dict[str, dict[str, Any]] = {}
 
 
-_C = TypeVar("_C", bound=AppConfig)
-
-
-def load_config(
+def load_config[C: AppConfig](
     config_path: Path | None = None,
     default_config_path: Path | None = None,
-    config_class: type[_C] = AppConfig,  # type: ignore[assignment]
-) -> _C:
+    config_class: type[C] = AppConfig,  # type: ignore[assignment]
+) -> C:
     """Load config from a TOML file.
 
     Args:

@@ -269,9 +269,7 @@ class DirectOIDCAuth(httpx.Auth):
             await self._load_tokens()
 
         if not self._tokens:
-            raise RuntimeError(
-                "No stored OAuth tokens — run 'auth login <server>' to authenticate"
-            )
+            raise RuntimeError("No stored OAuth tokens — run 'auth login <server>' to authenticate")
 
         # Proactively refresh before sending if expired
         if self._is_token_expired() and self._tokens.refresh_token:
@@ -289,8 +287,7 @@ class DirectOIDCAuth(httpx.Auth):
                     yield request
                 else:
                     raise RuntimeError(
-                        "OAuth token expired and refresh failed — "
-                        "run 'auth login <server>' to re-authenticate"
+                        "OAuth token expired and refresh failed — run 'auth login <server>' to re-authenticate"
                     )
 
 
@@ -329,7 +326,8 @@ async def run_direct_oidc_login(
         webbrowser.open(auth_url)
 
         code, returned_state = await asyncio.wait_for(
-            callback_server.wait_for_callback(), timeout=300.0,
+            callback_server.wait_for_callback(),
+            timeout=300.0,
         )
     finally:
         await callback_server.stop()

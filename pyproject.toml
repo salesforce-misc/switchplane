@@ -10,6 +10,12 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Demian Brecht", email = "dbrecht@salesforce.com"}]
 requires-python = ">=3.12"
+
+[project.urls]
+Homepage = "https://github.com/salesforce-misc/switchplane"
+Repository = "https://github.com/salesforce-misc/switchplane"
+Issues = "https://github.com/salesforce-misc/switchplane/issues"
+
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,8 +25,8 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-    "click>=8.3",
-    "pydantic>=2.0",
+    "click>=8.3,<9",
+    "pydantic>=2.0,<3",
     "aiosqlite>=0.20",
     "langgraph>=1.0",
     "prompt_toolkit>=3.0",
@@ -30,7 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 llm = ["langchain-core>=0.3"]
 mcp = ["mcp>=1.0", "switchplane[llm]"]
-test = ["pytest>=7.0", "pytest-asyncio>=0.23", "pytest-cov>=4.0", "pytest-xdist>=3.5"]
+test = ["pytest>=7.0", "pytest-asyncio>=0.23", "pytest-cov>=4.0", "pytest-xdist>=3.5", "ruff>=0.9"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/switchplane"]

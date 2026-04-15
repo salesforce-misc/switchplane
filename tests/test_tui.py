@@ -7,24 +7,21 @@ can be exercised without a terminal is covered here.
 
 import asyncio
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from switchplane.protocol import CliResponse, StreamEvent
+from switchplane.protocol import CliResponse
 from switchplane.tui import (
-    EventBuffer,
-    TUISession,
     _S_ERROR,
     _S_INFO,
     _S_RESULT,
-    _S_SYSTEM,
     _SYSTEM_TAB_ID,
+    EventBuffer,
+    TUISession,
     _parse_kv_args,
     build_tui_app,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1288,9 +1285,7 @@ class TestCmdList:
     @pytest.mark.asyncio
     async def test_displays_tasks(self, session):
         session._request = AsyncMock(
-            return_value=_ok(
-                [{"task_id": "abc", "agent_name": "ag", "task_name": "tk", "status": "running"}]
-            )
+            return_value=_ok([{"task_id": "abc", "agent_name": "ag", "task_name": "tk", "status": "running"}])
         )
         await session._cmd_list()
         lines = _system_lines(session)
@@ -1354,20 +1349,16 @@ class TestFetchTerminalResult:
     @pytest.mark.asyncio
     async def test_completed_with_result(self, session):
         session.add_task("t1", "a", "t")
-        session._request = AsyncMock(
-            return_value=_ok({"task": {"result_json": '{"answer": 42}', "error_json": None}})
-        )
+        session._request = AsyncMock(return_value=_ok({"task": {"result_json": '{"answer": 42}', "error_json": None}}))
         await session._fetch_terminal_result("t1", "completed")
         buf = session.buffers["t1"]
-        assert any(_S_RESULT == s for line in buf.lines for s, _t in _line_segments(line))
+        assert any(s == _S_RESULT for line in buf.lines for s, _t in _line_segments(line))
         assert any("42" in t for line in buf.lines for _s, t in _line_segments(line))
 
     @pytest.mark.asyncio
     async def test_completed_without_result_json_no_output(self, session):
         session.add_task("t1", "a", "t")
-        session._request = AsyncMock(
-            return_value=_ok({"task": {"result_json": None, "error_json": None}})
-        )
+        session._request = AsyncMock(return_value=_ok({"task": {"result_json": None, "error_json": None}}))
         before = len(session.buffers["t1"].lines)
         await session._fetch_terminal_result("t1", "completed")
         assert len(session.buffers["t1"].lines) == before
@@ -1376,9 +1367,7 @@ class TestFetchTerminalResult:
     async def test_failed_with_error_json_dict(self, session):
         session.add_task("t1", "a", "t")
         err_data = json.dumps({"error": "kaboom"})
-        session._request = AsyncMock(
-            return_value=_ok({"task": {"result_json": None, "error_json": err_data}})
-        )
+        session._request = AsyncMock(return_value=_ok({"task": {"result_json": None, "error_json": err_data}}))
         await session._fetch_terminal_result("t1", "failed")
         assert any("kaboom" in t for line in session.buffers["t1"].lines for _s, t in _line_segments(line))
 
@@ -1386,9 +1375,7 @@ class TestFetchTerminalResult:
     async def test_failed_with_traceback_appended(self, session):
         session.add_task("t1", "a", "t")
         err_data = json.dumps({"error": "err", "traceback": "  File foo.py\n  line 2"})
-        session._request = AsyncMock(
-            return_value=_ok({"task": {"result_json": None, "error_json": err_data}})
-        )
+        session._request = AsyncMock(return_value=_ok({"task": {"result_json": None, "error_json": err_data}}))
         await session._fetch_terminal_result("t1", "failed")
         texts = [t for line in session.buffers["t1"].lines for _s, t in _line_segments(line)]
         assert any("foo.py" in t for t in texts)
@@ -1396,9 +1383,7 @@ class TestFetchTerminalResult:
     @pytest.mark.asyncio
     async def test_failed_with_invalid_json_falls_back(self, session):
         session.add_task("t1", "a", "t")
-        session._request = AsyncMock(
-            return_value=_ok({"task": {"result_json": None, "error_json": "not json {{{"}})
-        )
+        session._request = AsyncMock(return_value=_ok({"task": {"result_json": None, "error_json": "not json {{{"}}))
         await session._fetch_terminal_result("t1", "failed")
         assert any("not json" in t for line in session.buffers["t1"].lines for _s, t in _line_segments(line))
 

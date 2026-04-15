@@ -87,9 +87,7 @@ class McpSession:
                 from switchplane.oauth import build_oauth_http_client
 
                 if self._runtime_dir is None:
-                    raise RuntimeError(
-                        f"MCP server '{self.config.name}' uses OAuth but runtime_dir was not provided"
-                    )
+                    raise RuntimeError(f"MCP server '{self.config.name}' uses OAuth but runtime_dir was not provided")
                 http_client = await build_oauth_http_client(self.config, self._runtime_dir)
                 logger.debug("mcp_oauth_transport", server=self.config.name)
             elif self.config.http_transport:
@@ -129,9 +127,7 @@ class McpSession:
             except httpx.TimeoutException:
                 logger.info("mcp_preflight_timeout", server=self.config.name)
             except Exception as e:
-                raise ConnectionError(
-                    f"Cannot reach MCP server '{self.config.name}' at {self.config.url}: {e}"
-                ) from e
+                raise ConnectionError(f"Cannot reach MCP server '{self.config.name}' at {self.config.url}: {e}") from e
             finally:
                 if self.config.oauth or http_client is None:
                     await preflight_client.aclose()
@@ -158,11 +154,7 @@ class McpSession:
         """Call a tool on this MCP server."""
         if not self.session:
             raise RuntimeError(f"MCP session '{self.config.name}' not initialized")
-        read_timeout = (
-            datetime.timedelta(seconds=self.config.timeout)
-            if self.config.timeout is not None
-            else None
-        )
+        read_timeout = datetime.timedelta(seconds=self.config.timeout) if self.config.timeout is not None else None
         return await self.session.call_tool(name, arguments, read_timeout_seconds=read_timeout)
 
 
@@ -272,10 +264,7 @@ def _resolve_python_type(prop_schema: dict) -> type:
     """
     if "anyOf" in prop_schema or "oneOf" in prop_schema:
         variants = prop_schema.get("anyOf") or prop_schema.get("oneOf", [])
-        types = [
-            type(None) if v.get("type") == "null" else _resolve_python_type(v)
-            for v in variants
-        ]
+        types = [type(None) if v.get("type") == "null" else _resolve_python_type(v) for v in variants]
         types = list(dict.fromkeys(types))  # dedupe, preserve order
         if len(types) == 1:
             return types[0]
@@ -287,10 +276,7 @@ def _resolve_python_type(prop_schema: dict) -> type:
     json_type = prop_schema.get("type", "string")
 
     if isinstance(json_type, list):
-        types = [
-            type(None) if t == "null" else _json_type_to_python(t)
-            for t in json_type
-        ]
+        types = [type(None) if t == "null" else _json_type_to_python(t) for t in json_type]
         types = list(dict.fromkeys(types))
         if len(types) == 1:
             return types[0]

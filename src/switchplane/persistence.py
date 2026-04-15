@@ -32,51 +32,55 @@ class Store:
     async def initialize(self) -> None:
         """Open connection and create tables if needed."""
         self._db = await aiosqlite.connect(self.db_path)
+        try:
+            # Enable WAL mode for better concurrency
+            await self._db.execute("PRAGMA journal_mode=WAL")
 
-        # Enable WAL mode for better concurrency
-        await self._db.execute("PRAGMA journal_mode=WAL")
+            # Create tables if they don't exist
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS agents (
+                    agent_id TEXT PRIMARY KEY,
+                    agent_name TEXT NOT NULL,
+                    pid INTEGER,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT,
+                    last_heartbeat TEXT
+                )
+            """)
 
-        # Create tables if they don't exist
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS agents (
-                agent_id TEXT PRIMARY KEY,
-                agent_name TEXT NOT NULL,
-                pid INTEGER,
-                status TEXT NOT NULL DEFAULT 'idle',
-                capabilities_json TEXT NOT NULL DEFAULT '{}',
-                started_at TEXT,
-                last_heartbeat TEXT
-            )
-        """)
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    agent_name TEXT NOT NULL,
+                    task_name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    input_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT,
+                    error_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    workflow_identity_json TEXT,
+                    checkpoint_metadata_json TEXT
+                )
+            """)
 
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                agent_name TEXT NOT NULL,
-                task_name TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                input_json TEXT NOT NULL DEFAULT '{}',
-                result_json TEXT,
-                error_json TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                workflow_identity_json TEXT,
-                checkpoint_metadata_json TEXT
-            )
-        """)
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+                )
+            """)
 
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
-            )
-        """)
-
-        await self._db.commit()
+            await self._db.commit()
+        except BaseException:
+            await self._db.close()
+            self._db = None
+            raise
 
     # Task methods
 
@@ -463,9 +467,7 @@ class Store:
 
         # Checkpoint tables are created by checkpoint.py, not by Store.initialize().
         # Guard with IF EXISTS so clear works even if checkpointing was never used.
-        cursor = await self._db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
-        )
+        cursor = await self._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
         if await cursor.fetchone():
             await self._db.execute(
                 f"DELETE FROM checkpoints WHERE thread_id IN ({placeholders})",

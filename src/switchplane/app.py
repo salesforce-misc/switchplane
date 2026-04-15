@@ -109,6 +109,7 @@ class Application:
                 config sections that are otherwise dropped by the base model.
         """
         from switchplane.config import AppConfig as _AppConfig
+
         if not _VALID_APP_NAME.match(name):
             raise ValueError(
                 f"Invalid application name {name!r}. "

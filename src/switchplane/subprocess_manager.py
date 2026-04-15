@@ -95,25 +95,30 @@ class SubprocessManager:
             log_file.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            sys.executable, "-m", "switchplane.agent_runtime",
-            "--entry-point", agent_spec.module_path,
-            "--ipc-fd", str(agent_fd),
+            sys.executable,
+            "-m",
+            "switchplane.agent_runtime",
+            "--entry-point",
+            agent_spec.module_path,
+            "--ipc-fd",
+            str(agent_fd),
         ]
         if log_file:
             cmd += ["--log-file", str(log_file)]
 
         stderr_dest = open(log_file, "ab") if log_file else asyncio.subprocess.PIPE  # noqa: SIM115
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            pass_fds=(agent_fd,),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=stderr_dest,
-        )
-        if log_file:
-            stderr_dest.close()  # child has its own copy
-
-        # Child has its own copy of agent_fd now; close ours
-        agent_sock.close()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                pass_fds=(agent_fd,),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=stderr_dest,
+            )
+        finally:
+            if log_file:
+                stderr_dest.close()  # child has its own copy
+            # Child has its own copy of agent_fd now; close ours
+            agent_sock.close()
 
         # Wrap CP's end for async I/O
         reader, writer = await asyncio.open_connection(sock=cp_sock)
@@ -259,7 +264,9 @@ class SubprocessManager:
             task = await self.store.get_task(handle.task_id)
             if task and task.status in (TaskStatus.RUNNING, TaskStatus.INTERRUPTED):
                 # Agent exited without emitting task.completed/task.failed
-                logger.warning("agent_exited_task_still_running", agent_id=handle.agent_id, rc=rc, task_id=handle.task_id)
+                logger.warning(
+                    "agent_exited_task_still_running", agent_id=handle.agent_id, rc=rc, task_id=handle.task_id
+                )
                 await self.store.update_task(
                     handle.task_id,
                     status=TaskStatus.FAILED,
