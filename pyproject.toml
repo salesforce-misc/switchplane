@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "switchplane"
+version = "0.1.0"
+description = "Python runtime control plane for agent-based task execution, LangGraph-native"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Demian Brecht", email = "dbrecht@salesforce.com"}]
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "click>=8.3",
+    "pydantic>=2.0",
+    "aiosqlite>=0.20",
+    "langgraph>=1.0",
+    "prompt_toolkit>=3.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+llm = ["langchain-core>=0.3"]
+mcp = ["mcp>=1.0", "switchplane[llm]"]
+test = ["pytest>=7.0", "pytest-asyncio>=0.23", "pytest-cov>=4.0", "pytest-xdist>=3.5"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/switchplane"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.9",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",   # line length (handled by formatter)
+    "SIM105", # contextlib.suppress — try/except/pass is clearer in cleanup paths
+    "SIM108", # ternary operator (readability preference)
+    "UP007",  # X | Y union syntax in older annotations
+    "RUF001", # ambiguous unicode — intentional use of ✓ ✗ × etc
+    "RUF003", # ambiguous unicode in comments — en dash is fine
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["switchplane"]

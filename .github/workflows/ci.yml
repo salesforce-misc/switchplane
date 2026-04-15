@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install ruff
+        run: uv tool install ruff
+      - name: Check formatting
+        run: ruff format --check src/ tests/ examples/
+      - name: Check linting
+        run: ruff check src/ tests/ examples/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e ".[test]" -e examples/hello -e examples/weather -e examples/joke -e examples/stream
+
+      - name: Run tests
+        run: uv run pytest -x -q

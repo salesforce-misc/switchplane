@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chatbot"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "switchplane",
+    "langchain-anthropic",
+]
+
+[project.scripts]
+chatbot = "chatbot.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chatbot"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"chatbot/config.toml" = "chatbot/config.toml"
