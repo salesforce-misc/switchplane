@@ -10,12 +10,6 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Demian Brecht", email = "dbrecht@salesforce.com"}]
 requires-python = ">=3.12"
-
-[project.urls]
-Homepage = "https://github.com/salesforce-misc/switchplane"
-Repository = "https://github.com/salesforce-misc/switchplane"
-Issues = "https://github.com/salesforce-misc/switchplane/issues"
-
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -32,6 +26,11 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "structlog>=24.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/salesforce-misc/switchplane"
+Repository = "https://github.com/salesforce-misc/switchplane"
+Issues = "https://github.com/salesforce-misc/switchplane/issues"
 
 [project.optional-dependencies]
 llm = ["langchain-core>=0.3"]
