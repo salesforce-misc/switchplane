@@ -1,0 +1,21 @@
+feature:
+  - head-branch: ['^feat/', '^feature/']
+
+bug:
+  - head-branch: ['^fix/', '^bug/']
+
+docs:
+  - changed-files:
+    - any-glob-to-any-file: ['docs/**', '*.md']
+
+tests:
+  - changed-files:
+    - any-glob-to-any-file: ['tests/**']
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file: ['.github/**']
+
+examples:
+  - changed-files:
+    - any-glob-to-any-file: ['examples/**']
