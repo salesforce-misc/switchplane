@@ -35,7 +35,8 @@ src/switchplane/           # Main package (pip-installable)
 
 examples/hello/        # Simple LangGraph graph (get_user → say_hello)
 examples/weather/      # Long-running polling task (Open-Meteo weather watch, @command for coordinates)
-examples/joke/         # LLM + MCP tool calling (Anthropic + local MCP server for whoami/current_time)
+examples/devops/       # Ops review: deterministic pandas analysis + LLM summary
+examples/chatbot/      # Interactive LLM chat with interrupts
 tests/                     # Test directory (pytest)
 ```
 
@@ -60,7 +61,7 @@ Two-layer cascading TOML config. App-bundled defaults (specified via `Applicatio
 ```bash
 # Setup
 uv venv .venv && source .venv/bin/activate
-uv pip install -e . -e examples/hello -e examples/weather -e examples/joke
+uv pip install -e . -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot
 
 # Run a task (streams events inline, Ctrl+C detaches)
 hello run example hello --name Alice
@@ -104,7 +105,7 @@ In CLI attached mode (`run`/`follow`/`resume`), only `/` task commands are suppo
 
 ## Dependencies
 
-click, pydantic v2, aiosqlite, langgraph. Optional: `mcp` + `langchain-core` via `switchplane[mcp]`. Example-specific: langchain-anthropic (joke), httpx (weather).
+click, pydantic v2, aiosqlite, langgraph, prompt_toolkit, structlog. Optional: `langchain-core` via `switchplane[llm]`; `mcp` + `langchain-core` via `switchplane[mcp]`. Example-specific: langchain-anthropic (devops, chatbot), httpx (weather), pandas + numpy (devops).
 
 ## IPC protocols
 
@@ -138,8 +139,7 @@ Resume flow: CLI sends `resume_task` request → control plane validates termina
 ## Testing
 
 ```bash
-source .venv/bin/activate
-pytest
+make test
 ```
 
 ## Style
