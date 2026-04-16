@@ -431,7 +431,8 @@ class ReviewTask(Task):
         ctx.progress(f"Starting ops review (model: {model})")
         ctx.progress("Generating mock NewRelic metrics (2 weeks, 5-min granularity)...")
 
-        graph = _build_graph(llm).compile()
+        graph = _build_graph(llm).compile(checkpointer=ctx.checkpointer)
+        config = {"configurable": {"thread_id": ctx.task_id}}
 
         initial: ReviewState = {
             "current": None,
@@ -442,5 +443,5 @@ class ReviewTask(Task):
             "report": "",
         }
 
-        result = await graph.ainvoke(initial)
+        result = await graph.ainvoke(initial, config)
         ctx.complete(result["report"])

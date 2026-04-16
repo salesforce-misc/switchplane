@@ -1,25 +1,34 @@
 # Switchplane
 
-> **Experimental.** Switchplane is under active development. APIs, IPC protocols, and storage formats may change without notice. You have been warned.
+Most agent frameworks hand everything to the LLM and hope for the best. Switchplane takes a different position:
+
+> **If it's deterministic, write it in code. If it requires judgment, call the LLM.**
+
+Here's what that looks like — a weekly ops review built with Switchplane has 4 graph nodes:
+
+```
+fetch_metrics → analyze → summarize → compile_report
+(deterministic)  (deterministic)  (LLM)     (deterministic)
+```
+
+Three nodes are pure Python: pandas for statistical analysis, z-score spike detection, formatted report compilation. One node calls an LLM to interpret the pre-computed statistics into an executive summary. Total LLM cost: **~$0.02**. The deterministic nodes find the anomalies, compute the week-over-week deltas, and format the output. The LLM provides judgment on what the numbers mean. ([Full example below.](#devops-ops-review--the-switchplane-thesis-in-action))
+
+Switchplane is a **runtime control plane** for LangGraph-native agent workflows. It is not a task library, prompt framework, or LLM wrapper. It's a daemonized supervisor that manages agent subprocesses, persists task state in SQLite, and generates a CLI for your application. Each app you build with Switchplane becomes a standalone command-line tool with its own isolated runtime.
+
+> **Experimental.** APIs, IPC protocols, and storage formats may change without notice.
 
 White paper: [docs/white-paper.md](docs/white-paper.md)
 
-A Python runtime harness for executing agent-based tasks with LangGraph-native workflow support.
-
-Switchplane is **not** a task library. It is a **runtime control plane**: a daemonized supervisor that manages agent subprocesses, persists task state in SQLite, and generates a CLI for your application. Each app you build with Switchplane becomes a standalone command-line tool with its own isolated runtime.
-
-Switchplane is for developers building local, long-running agent workflows who want process supervision, durable task state, and CLI operability without adopting a cloud platform. If you're writing agents that coordinate real work (file operations, API calls, data pipelines, code generation) and you want to operate them from a terminal, this is for you.
-
 ## Why Switchplane?
 
-The industry trend is to lump everything into markdown files and hope things work when thrown at an LLM. Switchplane takes a different position: **if it's deterministic, write it in code; if it requires judgment, call the LLM.** Four problems drive this:
+The industry trend is to lump everything into markdown files and hope things work when thrown at an LLM. Four problems with that:
 
-- **Guaranteed determinism.** LangGraph graphs execute the flow you defined. Variance occurs where you expect it — when interacting with humans or LLMs — but the overarching execution is guaranteed. Individual nodes with deterministic requirements are authored as code, not handed off to an LLM for interpretation.
-- **Auditability and testability.** Every task has persistent event history, queryable after the fact. Graph implementations are unit-testable. You can read through the output and understand what happened and where.
+- **Determinism.** LangGraph graphs execute the flow you defined. Variance occurs where you expect it — when interacting with humans or LLMs — but the overarching execution is guaranteed. Deterministic steps are authored as code, not handed off to an LLM for interpretation.
+- **Auditability.** Every task has persistent event history, queryable after the fact. Graph nodes are unit-testable. You can trace exactly what happened and where.
 - **Vendor independence.** You control what model you use for what purpose. Swap providers, mix models within a workflow, or run locally — your task logic is a LangGraph graph, not a provider-specific format.
-- **Cost.** LLMs are used when judgment is actually required. The rest of the flow executes as code — microseconds instead of API calls, at zero marginal cost.
+- **Cost.** LLMs are used when judgment is actually required. The rest executes as code — microseconds instead of API calls, at zero marginal cost.
 
-Language models are fundamentally non-deterministic. That's not a bug — it's the feature you're paying for. The better approach: let the LLM be non-deterministic where it's useful, and enforce deterministic *properties* around it. Your task graph can branch unpredictably. The runtime's behavior should not.
+Language models are fundamentally non-deterministic. That's not a bug — it's the feature you're paying for. The better approach: let the LLM be non-deterministic where it's useful, and enforce deterministic properties around it. Your task graph can branch unpredictably. The runtime's behavior should not.
 
 Switchplane enforces those properties:
 
@@ -28,7 +37,6 @@ Switchplane enforces those properties:
 - **Process isolation** via supervised subprocesses, not inline execution
 - **Bidirectional IPC** to running tasks: send commands and receive events mid-flight
 - **Operational control** from a CLI: start, stop, inspect, cancel, resume
-- **Provider independence**: your task logic is a LangGraph graph, not a provider-specific format
 
 The runtime is deterministic code solving deterministic problems, so the LLM can focus on the judgment calls it's actually good at.
 
