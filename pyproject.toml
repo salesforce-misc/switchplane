@@ -27,6 +27,9 @@ dependencies = [
     "structlog>=24.0",
 ]
 
+[project.scripts]
+switchplane = "switchplane.scaffold:cli"
+
 [project.urls]
 Homepage = "https://github.com/salesforce-misc/switchplane"
 Repository = "https://github.com/salesforce-misc/switchplane"

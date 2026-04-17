@@ -84,6 +84,21 @@ uv pip install -e examples/chatbot  # interactive LLM chat
 
 ## Quick start
 
+### Create a new project
+
+```bash
+switchplane init myapp
+cd myapp
+uv venv .venv && source .venv/bin/activate
+uv pip install -e .
+myapp agent list
+myapp run default hello
+```
+
+This generates a complete project with a hello-world task, ready to run. See [Writing an application](#writing-an-application) for details on the generated structure.
+
+### Run an example
+
 ```bash
 # Run a task — opens the interactive TUI (daemon auto-starts if needed)
 hello run example hello --user-name Alice
@@ -297,6 +312,14 @@ That `coordinates` command sends a typed, validated command to a *running* task 
 
 ## Writing an application
 
+The fastest way to start is `switchplane init`:
+
+```bash
+switchplane init myapp
+```
+
+This generates the following project structure:
+
 ### Project structure
 
 ```
@@ -305,10 +328,10 @@ myapp/
 └── myapp/
     ├── app.py
     └── agents/
-        └── myagent/
+        └── default/
             ├── agent.py
             └── tasks/
-                └── mytask.py
+                └── hello.py
 ```
 
 ### Application object
