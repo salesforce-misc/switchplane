@@ -15,9 +15,7 @@ Three nodes are pure Python: pandas for statistical analysis, z-score spike dete
 
 Switchplane is a **runtime control plane** for LangGraph-native agent workflows. It is not a task library, prompt framework, or LLM wrapper. It's a daemonized supervisor that manages agent subprocesses, persists task state in SQLite, and generates a CLI for your application. Each app you build with Switchplane becomes a standalone command-line tool with its own isolated runtime.
 
-> **Experimental.** APIs, IPC protocols, and storage formats may change without notice.
-
-White paper: [docs/white-paper.md](docs/white-paper.md)
+> **Early-stage, actively developed.** APIs, IPC protocols, and storage formats may change without notice.
 
 ## Why Switchplane?
 
