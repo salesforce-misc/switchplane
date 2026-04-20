@@ -355,6 +355,7 @@ class TestClearTasks:
             },
         )
         task_id = submit.result["task_id"]
+        await cp.store.update_task(task_id, status=TaskStatus.RUNNING)
         await cp.store.update_task(task_id, status=TaskStatus.COMPLETED)
 
         resp = await _request(cp, "clear_tasks")

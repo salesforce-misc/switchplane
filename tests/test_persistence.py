@@ -82,6 +82,7 @@ class TestTaskCRUD:
     @pytest.mark.asyncio
     async def test_update_result(self, store):
         await store.create_task(_make_task())
+        await store.update_task("t1", status=TaskStatus.RUNNING)
         await store.update_task("t1", status=TaskStatus.COMPLETED, result_json='{"answer": 42}')
         result = await store.get_task("t1")
         assert result.status == TaskStatus.COMPLETED
@@ -116,6 +117,47 @@ class TestTaskCRUD:
 
         running = await store.list_tasks(status=TaskStatus.RUNNING)
         assert len(running) == 1
+
+
+class TestStatusTransitions:
+    @pytest.mark.asyncio
+    async def test_valid_pending_to_running(self, store):
+        await store.create_task(_make_task())
+        await store.update_task("t1", status=TaskStatus.RUNNING)
+        result = await store.get_task("t1")
+        assert result.status == TaskStatus.RUNNING
+
+    @pytest.mark.asyncio
+    async def test_valid_running_to_completed(self, store):
+        await store.create_task(_make_task(status=TaskStatus.RUNNING))
+        await store.update_task("t1", status=TaskStatus.COMPLETED)
+        result = await store.get_task("t1")
+        assert result.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_valid_terminal_to_pending_resume(self, store):
+        for terminal in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            await store.create_task(_make_task(task_id=terminal.value, status=terminal))
+            await store.update_task(terminal.value, status=TaskStatus.PENDING)
+            result = await store.get_task(terminal.value)
+            assert result.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_invalid_completed_to_running(self, store):
+        await store.create_task(_make_task(status=TaskStatus.COMPLETED))
+        with pytest.raises(ValueError, match="Invalid task status transition"):
+            await store.update_task("t1", status=TaskStatus.RUNNING)
+
+    @pytest.mark.asyncio
+    async def test_invalid_pending_to_completed(self, store):
+        await store.create_task(_make_task())
+        with pytest.raises(ValueError, match="Invalid task status transition"):
+            await store.update_task("t1", status=TaskStatus.COMPLETED)
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_task_skips_validation(self, store):
+        # update_task on a missing task_id silently no-ops (existing behaviour)
+        await store.update_task("ghost", status=TaskStatus.RUNNING)
 
 
 class TestAgentCRUD:
