@@ -6,6 +6,7 @@ import pytest
 
 from switchplane.agent_runtime import (
     AgentContext,
+    _import_task_class,
     _listen_for_commands,
     _read_message,
     _start_checkpointer,
@@ -332,9 +333,37 @@ class TestStartStopCheckpointer:
         agent_sock.close()
 
 
+class TestImportTaskClass:
+    def test_finds_task_subclass(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "importpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "mytask.py").write_text(
+            "from switchplane.task import Task\n"
+            "class MyTask(Task):\n"
+            '    name = "mytask"\n'
+            "    async def run(self, ctx):\n"
+            "        pass\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cls = _import_task_class("importpkg.mytask")
+        assert cls.name == "mytask"
+
+    def test_no_task_class_raises(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "noimportpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "empty.py").write_text("x = 1\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="No Task subclass"):
+            _import_task_class("noimportpkg.empty")
+
+
 class TestRunTask:
     @pytest.mark.asyncio
-    async def test_runs_task_from_module(self, tmp_path, monkeypatch):
+    async def test_runs_task_from_class(self, tmp_path, monkeypatch):
         from switchplane.agent_runtime import _run_task
 
         pkg = tmp_path / "runtaskpkg"
@@ -352,26 +381,10 @@ class TestRunTask:
         cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         ctx = AgentContext(task_id="t1", task_name="mytask", ipc_sock=agent_sock, config={})
 
-        await _run_task(ctx, "runtaskpkg.mytask", {})
+        task_class = _import_task_class("runtaskpkg.mytask")
+        await _run_task(ctx, task_class, {})
         agent_sock.close()
         cp_sock.close()
-
-    @pytest.mark.asyncio
-    async def test_no_task_class_raises(self, tmp_path, monkeypatch):
-        from switchplane.agent_runtime import _run_task
-
-        pkg = tmp_path / "notaskpkg"
-        pkg.mkdir()
-        (pkg / "__init__.py").write_text("")
-        (pkg / "empty.py").write_text("x = 1\n")
-        monkeypatch.syspath_prepend(str(tmp_path))
-
-        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
-
-        with pytest.raises(RuntimeError, match="No Task subclass"):
-            await _run_task(ctx, "notaskpkg.empty", {})
-        agent_sock.close()
 
     @pytest.mark.asyncio
     async def test_runs_task_with_params(self, tmp_path, monkeypatch):
@@ -394,7 +407,8 @@ class TestRunTask:
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         ctx = AgentContext(task_id="t1", task_name="greet", ipc_sock=agent_sock, config={})
 
-        await _run_task(ctx, "paramtaskpkg.greet", {"whom": "World"})
+        task_class = _import_task_class("paramtaskpkg.greet")
+        await _run_task(ctx, task_class, {"whom": "World"})
         agent_sock.close()
 
 
@@ -503,3 +517,116 @@ class TestStartStopMcp:
         )
         await _stop_mcp(ctx)  # should not raise
         agent_sock.close()
+
+
+class TestTaskMcpServerFiltering:
+    """Tests for task-level MCP server declarations in agent_main filtering logic."""
+
+    def _agent_main_filter(self, task_class, mcp_configs):
+        """Replicate the filtering logic from agent_main for unit testing."""
+        if task_class.mcp_servers:
+            available = {c["name"]: c for c in mcp_configs}
+            filtered = [available[n] for n in task_class.mcp_servers if n in available]
+            missing = [n for n in task_class.mcp_servers if n not in available]
+            return filtered, missing
+        return [], []
+
+    def test_task_with_specific_servers(self):
+        from switchplane.task import Task
+
+        class MyTask(Task):
+            name = "my"
+            mcp_servers = ["server_a"]  # noqa: RUF012
+
+            async def run(self, ctx):
+                pass
+
+        all_configs = [
+            {"name": "server_a", "command": ["echo"]},
+            {"name": "server_b", "command": ["echo"]},
+        ]
+
+        filtered, missing = self._agent_main_filter(MyTask, all_configs)
+        assert len(filtered) == 1
+        assert filtered[0]["name"] == "server_a"
+        assert missing == []
+
+    def test_task_with_empty_mcp_servers(self):
+        from switchplane.task import Task
+
+        class MyTask(Task):
+            name = "my"
+
+            async def run(self, ctx):
+                pass
+
+        assert MyTask.mcp_servers == []
+
+        all_configs = [
+            {"name": "server_a", "command": ["echo"]},
+            {"name": "server_b", "command": ["echo"]},
+        ]
+
+        filtered, missing = self._agent_main_filter(MyTask, all_configs)
+        assert filtered == []
+        assert missing == []
+
+    def test_task_requests_unavailable_server(self):
+        from switchplane.task import Task
+
+        class MyTask(Task):
+            name = "my"
+            mcp_servers = ["server_a", "server_missing"]  # noqa: RUF012
+
+            async def run(self, ctx):
+                pass
+
+        all_configs = [
+            {"name": "server_a", "command": ["echo"]},
+        ]
+
+        filtered, missing = self._agent_main_filter(MyTask, all_configs)
+        assert len(filtered) == 1
+        assert filtered[0]["name"] == "server_a"
+        assert missing == ["server_missing"]
+
+    def test_task_requests_multiple_servers(self):
+        from switchplane.task import Task
+
+        class MyTask(Task):
+            name = "my"
+            mcp_servers = ["server_b", "server_a"]  # noqa: RUF012
+
+            async def run(self, ctx):
+                pass
+
+        all_configs = [
+            {"name": "server_a", "command": ["echo"]},
+            {"name": "server_b", "url": "http://x"},
+            {"name": "server_c", "command": ["echo"]},
+        ]
+
+        filtered, missing = self._agent_main_filter(MyTask, all_configs)
+        assert len(filtered) == 2
+        # Order follows task_class.mcp_servers declaration order
+        assert filtered[0]["name"] == "server_b"
+        assert filtered[1]["name"] == "server_a"
+        assert missing == []
+
+    def test_mcp_servers_not_treated_as_parameter(self):
+        from pydantic import Field
+
+        from switchplane.task import Task
+
+        class MyTask(Task):
+            name = "my"
+            mcp_servers = ["server_a"]  # noqa: RUF012
+            custom: str = Field(description="a param")
+
+            async def run(self, ctx):
+                pass
+
+        model = MyTask.parameters_model()
+        assert model is not None
+        assert "custom" in model.model_fields
+        assert "mcp_servers" not in model.model_fields

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, get_type_hints
+from typing import TYPE_CHECKING, ClassVar, Literal, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, create_model
 from pydantic.fields import FieldInfo
@@ -118,6 +118,7 @@ class Task(ABC):
     name: str = ""
     description: str = ""
     mode: Literal["ephemeral", "long_running"] = "ephemeral"
+    mcp_servers: ClassVar[list[str]] = []
     _ctx: "AgentContext | None" = None
 
     @classmethod
