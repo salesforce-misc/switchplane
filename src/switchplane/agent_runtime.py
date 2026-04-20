@@ -411,23 +411,23 @@ async def _stop_mcp(ctx: AgentContext) -> None:
             pass
 
 
-async def _run_task(ctx: AgentContext, task_module_path: str, raw_params: dict) -> None:
-    """Import and execute the user task."""
+def _import_task_class(task_module_path: str) -> type:
+    """Import the module at *task_module_path* and return the Task subclass."""
+    module = importlib.import_module(task_module_path)
+
+    from switchplane.task import Task
+
+    for name in dir(module):
+        obj = getattr(module, name)
+        if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task:
+            return obj
+
+    raise RuntimeError(f"No Task subclass found in {task_module_path}")
+
+
+async def _run_task(ctx: AgentContext, task_class: type, raw_params: dict) -> None:
+    """Instantiate and execute a previously-imported Task subclass."""
     try:
-        module = importlib.import_module(task_module_path)
-
-        from switchplane.task import Task
-
-        task_class = None
-        for name in dir(module):
-            obj = getattr(module, name)
-            if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task:
-                task_class = obj
-                break
-
-        if task_class is None:
-            raise RuntimeError(f"No Task subclass found in {task_module_path}")
-
         task_instance = task_class()
         task_instance._ctx = ctx
         ctx._task = task_instance
@@ -501,6 +501,26 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
     _ipc_handler = _IPCLogHandler(ctx)
     _logging.getLogger().addHandler(_ipc_handler)
 
+    # Import the task class early so we can inspect mcp_servers before
+    # starting any MCP connections.
+    try:
+        task_class = _import_task_class(task_module_path)
+    except Exception as e:
+        ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
+        _writer.close()
+        sock.close()
+        return
+
+    # Only start MCP servers the task actually needs
+    if task_class.mcp_servers:
+        available = {c["name"]: c for c in mcp_configs}
+        mcp_configs = [available[n] for n in task_class.mcp_servers if n in available]
+        missing = [n for n in task_class.mcp_servers if n not in available]
+        for name in missing:
+            _logger.warning("task_mcp_server_not_available", server=name, task=task_class.name)
+    else:
+        mcp_configs = []
+
     # Start checkpointer and MCP sessions before task execution
     await _start_checkpointer(ctx)
     try:
@@ -515,7 +535,7 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
     ctx.emit("task.started", {})
 
     # Run the task and the command listener concurrently
-    task_handle = asyncio.create_task(_run_task(ctx, task_module_path, params))
+    task_handle = asyncio.create_task(_run_task(ctx, task_class, params))
     listener_handle = asyncio.create_task(_listen_for_commands(reader, ctx, task_handle))
 
     try:

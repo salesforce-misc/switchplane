@@ -118,6 +118,7 @@ class Task(ABC):
     name: str = ""
     description: str = ""
     mode: Literal["ephemeral", "long_running"] = "ephemeral"
+    mcp_servers: list[str] = []
     _ctx: "AgentContext | None" = None
 
     @classmethod
