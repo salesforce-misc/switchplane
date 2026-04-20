@@ -536,7 +536,7 @@ class TestTaskMcpServerFiltering:
 
         class MyTask(Task):
             name = "my"
-            mcp_servers = ["server_a"]
+            mcp_servers = ["server_a"]  # noqa: RUF012
 
             async def run(self, ctx):
                 pass
@@ -576,7 +576,7 @@ class TestTaskMcpServerFiltering:
 
         class MyTask(Task):
             name = "my"
-            mcp_servers = ["server_a", "server_missing"]
+            mcp_servers = ["server_a", "server_missing"]  # noqa: RUF012
 
             async def run(self, ctx):
                 pass
@@ -595,7 +595,7 @@ class TestTaskMcpServerFiltering:
 
         class MyTask(Task):
             name = "my"
-            mcp_servers = ["server_b", "server_a"]
+            mcp_servers = ["server_b", "server_a"]  # noqa: RUF012
 
             async def run(self, ctx):
                 pass
@@ -620,7 +620,7 @@ class TestTaskMcpServerFiltering:
 
         class MyTask(Task):
             name = "my"
-            mcp_servers = ["server_a"]
+            mcp_servers = ["server_a"]  # noqa: RUF012
             custom: str = Field(description="a param")
 
             async def run(self, ctx):
