@@ -146,7 +146,13 @@ def _discover_task(agent_spec: AgentSpec, task_module_path: str) -> None:
     for attr_name in dir(task_module):
         obj = getattr(task_module, attr_name)
         if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task:
-            task_name = getattr(obj, "name", None) or module_basename
+            # Skip classes imported from other modules (e.g. base classes)
+            if getattr(obj, "__module__", None) != task_module.__name__:
+                continue
+            # Skip base classes that don't declare a task name
+            task_name = getattr(obj, "name", None)
+            if not task_name:
+                continue
             agent_spec.tasks[task_name] = obj
             logger.debug("task_discovered", task=task_name, cls=obj.__name__)
             found = True

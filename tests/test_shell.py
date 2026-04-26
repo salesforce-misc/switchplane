@@ -198,11 +198,11 @@ class TestFsTools:
 
 class TestWriteTools:
     @pytest.mark.asyncio
-    async def test_creates_two_tools(self, shell):
+    async def test_creates_three_tools(self, shell):
         tools = shell.write_tools()
-        assert len(tools) == 2
+        assert len(tools) == 3
         names = {t.name for t in tools}
-        assert names == {"write_file", "create_directory"}
+        assert names == {"write_file", "edit_file", "create_directory"}
 
     @pytest.mark.asyncio
     async def test_write_file(self, shell, tmp_path):
@@ -254,7 +254,8 @@ class TestCodeTools:
     @pytest.mark.asyncio
     async def test_combines_fs_and_write(self, shell):
         tools = shell.code_tools()
-        assert len(tools) == 6
+        assert len(tools) == 7
         names = {t.name for t in tools}
         assert "list_directory" in names
         assert "write_file" in names
+        assert "edit_file" in names

@@ -91,6 +91,7 @@ class ControlPlane:
             self.store,
             app=self.app,
             event_callback=self._on_agent_event,
+            request_handler=self.handle_request,
         )
 
         # Load config — uses the app's config_class so subclasses can define
@@ -166,12 +167,51 @@ class ControlPlane:
             if self._idle_timer:
                 self._idle_timer.reset()
 
+    async def _cancel_children(self, parent_task_id: str) -> int:
+        """Recursively cancel all non-terminal children of a task.
+
+        Returns the number of tasks cancelled.
+        """
+        children = await self.store.get_child_tasks(parent_task_id)
+        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        count = 0
+        for child in children:
+            if child.status in terminal:
+                continue
+            # Try to cancel the running subprocess
+            await self.subprocess_mgr.cancel_task(child.task_id)
+            # If the task has no running subprocess (e.g. stuck in PENDING),
+            # update the status directly
+            task = await self.store.get_task(child.task_id)
+            if task and task.status not in terminal:
+                await self.store.update_task(
+                    child.task_id,
+                    status=TaskStatus.CANCELLED,
+                    error_json=json.dumps({"error": f"Cascade cancelled: parent {parent_task_id} terminated"}),
+                )
+                await self.store.add_event(
+                    child.task_id,
+                    "task.cancelled",
+                    {"reason": f"Parent task {parent_task_id} terminated"},
+                )
+            count += 1
+            # Recurse into this child's children
+            count += await self._cancel_children(child.task_id)
+        return count
+
     # Event types that mark a task as terminal
     _TERMINAL_EVENT_TYPES = frozenset({"task.completed", "task.failed", "task.cancelled"})
 
     async def _on_agent_event(self, event, event_id: int) -> None:
         """Push incoming agent events to all streaming subscribers for that task."""
         task_id = event.task_id
+
+        # Cascade cancellation when a task fails or is cancelled
+        if event.type in ("task.failed", "task.cancelled"):
+            children_cancelled = await self._cancel_children(task_id)
+            if children_cancelled:
+                logger.info("cascade_cancelled_children", parent=task_id, count=children_cancelled, trigger=event.type)
+
         subscribers = self._stream_subscribers.get(task_id)
         if not subscribers:
             return
@@ -278,6 +318,23 @@ class ControlPlane:
                 if not subscribers:
                     del self._stream_subscribers[task_id]
 
+    def _broadcast_system_event(self, event_type: str, payload: dict) -> None:
+        """Push a structured event to all system log subscribers."""
+        if not self._system_log_subscribers:
+            return
+        event = StreamEvent(
+            task_id="_system",
+            event_type=event_type,
+            payload=payload,
+            ts=datetime.now(UTC),
+            event_id=0,
+        )
+        for queue in list(self._system_log_subscribers):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
     def _broadcast_system_log(self, record: _logging.LogRecord, message: str) -> None:
         """Push a log record to all system log subscribers and the ring buffer."""
         ts = datetime.fromtimestamp(record.created, UTC)
@@ -379,6 +436,8 @@ class ControlPlane:
                     return await self._status(request)
                 case "task_command":
                     return await self._task_command(request)
+                case "notify_task":
+                    return await self._notify_task(request)
                 case "retry_from_checkpoint":
                     return await self._retry_from_checkpoint(request)
                 case "clear_tasks":
@@ -423,6 +482,7 @@ class ControlPlane:
                 return CliResponse(id=request.id, ok=False, error=f"Invalid parameters: {e}")
 
         # Create task record
+        parent_task_id = request.params.get("parent_task_id")
         now = datetime.now(UTC)
         task = TaskRecord(
             task_id=uuid4().hex[:12],
@@ -432,11 +492,20 @@ class ControlPlane:
             input_json=json.dumps(input_data),
             created_at=now,
             updated_at=now,
+            parent_task_id=parent_task_id,
         )
         await self.store.create_task(task)
 
         # Launch agent to execute task with config
         agent_id = await self.subprocess_mgr.launch_agent(agent_spec, task, self.config)
+
+        self._broadcast_system_event("task.created", {
+            "task_id": task.task_id,
+            "agent_name": task.agent_name,
+            "task_name": task.task_name,
+            "status": task.status.value,
+            "parent_task_id": task.parent_task_id,
+        })
 
         return CliResponse(
             id=request.id,
@@ -514,7 +583,13 @@ class ControlPlane:
             return CliResponse(id=request.id, ok=False, error="task_id required")
 
         cancelled = await self.subprocess_mgr.cancel_task(task_id)
-        return CliResponse(id=request.id, ok=True, result={"cancelled": cancelled})
+
+        # Cascade cancellation to children
+        children_cancelled = await self._cancel_children(task_id)
+        if children_cancelled:
+            logger.info("cascade_cancelled_children", parent=task_id, count=children_cancelled)
+
+        return CliResponse(id=request.id, ok=True, result={"cancelled": cancelled, "children_cancelled": children_cancelled})
 
     async def _list_agents(self, request: CliRequest) -> CliResponse:
         """List registered agents with task details."""
@@ -641,3 +716,17 @@ class ControlPlane:
             return CliResponse(id=request.id, ok=True, result={"sent": True})
         else:
             return CliResponse(id=request.id, ok=False, error="Task not found or command send failed")
+
+    async def _notify_task(self, request: CliRequest) -> CliResponse:
+        """Send a notification to a running task."""
+        task_id = request.params.get("task_id")
+        payload = request.params.get("payload", {})
+
+        if not task_id:
+            return CliResponse(id=request.id, ok=False, error="task_id required")
+
+        sent = await self.subprocess_mgr.send_notification(task_id, payload)
+        if sent:
+            return CliResponse(id=request.id, ok=True, result={"sent": True})
+        else:
+            return CliResponse(id=request.id, ok=False, error="Task not running or notification send failed")

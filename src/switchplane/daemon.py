@@ -238,8 +238,22 @@ def start_daemon(paths: RuntimePaths, app) -> None:
                         print(f"Control plane already running (PID {pid})")
                         return
 
-                # Process exists but socket never became available
-                print(f"Warning: Found stale PID {pid}, cleaning up", file=sys.stderr)
+                # Process exists but socket never became available — kill it
+                print(f"Warning: Found stale PID {pid}, terminating", file=sys.stderr)
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(25):  # Wait up to 5 seconds
+                    time.sleep(0.2)
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        break
+                else:
+                    # Still alive after SIGTERM, force kill
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        time.sleep(0.5)
+                    except OSError:
+                        pass
                 cleanup(paths)
 
         except (OSError, ValueError):

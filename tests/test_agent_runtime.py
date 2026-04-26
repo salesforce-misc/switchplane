@@ -186,11 +186,17 @@ class TestAgentContextProperties:
     def test_task_name(self, ctx):
         assert ctx.task_name == "test_task"
 
-    def test_mcp_none_by_default(self, ctx):
-        assert ctx.mcp is None
+    def test_mcp_returns_empty_dict_when_none(self, ctx):
+        """ctx.mcp returns an empty dict (not None) so callers can safely call .get()."""
+        assert ctx._mcp is None
+        result = ctx.mcp
+        assert result == {}
+        assert ctx.mcp.get("anything") is None
 
     @pytest.mark.asyncio
-    async def test_mcp_tools_empty(self, ctx):
+    async def test_mcp_tools_returns_empty_when_none(self, ctx):
+        """mcp_tools() returns empty dict when no MCP is configured."""
+        assert ctx._mcp is None
         tools = await ctx.mcp_tools()
         assert tools == {}
 
@@ -503,7 +509,8 @@ class TestStartStopMcp:
             config={},
         )
         await _start_mcp(ctx, [])
-        assert ctx.mcp is None
+        assert ctx._mcp is None  # internal state stays None
+        assert ctx.mcp == {}     # property returns empty dict for safe .get() access
         agent_sock.close()
 
     @pytest.mark.asyncio

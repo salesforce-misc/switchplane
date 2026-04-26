@@ -22,7 +22,7 @@ from switchplane._util import deep_merge, read_frame, write_frame
 from switchplane.agent import AgentRecord, AgentSpec, AgentStatus
 from switchplane.config import AppConfig
 from switchplane.persistence import Store
-from switchplane.protocol import AgentCommand, AgentEvent
+from switchplane.protocol import AgentCommand, AgentEvent, AgentRequest, AgentResponse, CliRequest
 from switchplane.task import TaskRecord, TaskStatus
 
 logger = structlog.get_logger()
@@ -74,10 +74,12 @@ class SubprocessManager:
         store: Store,
         app=None,
         event_callback: Callable[[AgentEvent, int], Any] | None = None,
+        request_handler: Callable[[CliRequest], Any] | None = None,
     ):
         self.store = store
         self._app = app
         self.event_callback = event_callback
+        self.request_handler = request_handler
         self._handles: dict[str, _AgentHandle] = {}  # agent_id -> handle
         self._task_to_agent: dict[str, str] = {}  # task_id -> agent_id
 
@@ -234,6 +236,23 @@ class SubprocessManager:
             logger.warning("user_command_send_failed", agent_id=agent_id, error=str(e))
             return False
 
+    async def send_notification(self, task_id: str, payload: dict[str, Any]) -> bool:
+        """Send a notification to the agent running a task."""
+        agent_id = self._task_to_agent.get(task_id)
+        if not agent_id:
+            return False
+        handle = self._handles.get(agent_id)
+        if not handle:
+            return False
+
+        try:
+            cmd = AgentCommand(type="notify", task_id=task_id, payload=payload)
+            await _write_message(handle.writer, cmd.model_dump_json().encode())
+            return True
+        except (ConnectionError, OSError) as e:
+            logger.warning("notify_send_failed", agent_id=agent_id, error=str(e))
+            return False
+
     # -- Reading events from agents ------------------------------------------
 
     async def _read_events(self, handle: _AgentHandle) -> None:
@@ -246,7 +265,13 @@ class SubprocessManager:
                     break
 
                 try:
-                    event = AgentEvent.model_validate_json(data)
+                    raw = json.loads(data)
+
+                    if raw.get("kind") == "request":
+                        await self._handle_agent_request(handle, raw)
+                        continue
+
+                    event = AgentEvent.model_validate(raw)
                     event_id = await self._handle_event(event)
 
                     if self.event_callback:
@@ -324,6 +349,37 @@ class SubprocessManager:
                 log_method("agent_log", task_id=event.task_id, message=msg)
 
         return event_id
+
+    async def _handle_agent_request(self, handle: _AgentHandle, raw: dict) -> None:
+        """Handle a request from an agent, forward to CP, send response back."""
+        if not self.request_handler:
+            return
+
+        agent_req = AgentRequest.model_validate(raw)
+
+        # Convert to CliRequest for the control plane handler
+        cli_request = CliRequest(
+            id=agent_req.request_id,
+            method=agent_req.method,
+            params=agent_req.params,
+        )
+
+        try:
+            cli_response = await self.request_handler(cli_request)
+            response = AgentResponse(
+                request_id=agent_req.request_id,
+                ok=cli_response.ok,
+                result=cli_response.result,
+                error=cli_response.error,
+            )
+        except Exception as e:
+            response = AgentResponse(
+                request_id=agent_req.request_id,
+                ok=False,
+                error=str(e),
+            )
+
+        await _write_message(handle.writer, response.model_dump_json().encode())
 
     async def _read_stderr(self, handle: _AgentHandle) -> None:
         """Capture stderr from the agent subprocess for logging.
