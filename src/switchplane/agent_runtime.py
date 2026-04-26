@@ -536,9 +536,19 @@ async def _start_mcp(ctx: AgentContext, mcp_configs: list[dict[str, Any]]) -> No
     for err in errors:
         _logger.error("mcp_server_start_failed", error=err)
 
-    if len(errors) == len(configs):
+    if errors:
         await manager.stop()
-        raise RuntimeError(f"All MCP servers failed to start: {'; '.join(errors)}")
+        failed_names = []
+        for err in errors:
+            for c in configs:
+                if c.name in err:
+                    failed_names.append(c.name)
+                    break
+        names = ", ".join(failed_names) if failed_names else "unknown"
+        raise RuntimeError(
+            f"MCP server(s) failed to start ({names}): {'; '.join(errors)}. "
+            f"Check authentication with 'auth login' for the failed server(s)."
+        )
 
     ctx._mcp = manager
 
