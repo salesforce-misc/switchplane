@@ -83,6 +83,7 @@ class TestAgentEvent:
             "task.failed",
             "task.cancelled",
             "checkpoint.save",
+            "llm.usage",
             "log",
             "task.command_result",
         ]

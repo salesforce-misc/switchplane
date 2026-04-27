@@ -315,6 +315,8 @@ class SubprocessManager:
                 pass
             case "checkpoint.save":
                 pass  # TODO: Forward to checkpoint saver
+            case "llm.usage":
+                pass  # Stored as regular event for task-level cost accounting
             case "task.command_result":
                 pass  # Stored as regular event
             case "log":

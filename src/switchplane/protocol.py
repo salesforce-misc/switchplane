@@ -57,6 +57,7 @@ class AgentEvent(BaseModel):
         "task.interrupted",
         "task.resumed",
         "checkpoint.save",
+        "llm.usage",
         "log",
         "task.command_result",
     ]

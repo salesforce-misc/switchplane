@@ -175,6 +175,33 @@ class TestAgentContextCommands:
         assert event.payload["result"]["lat"] == 1.0
 
 
+class TestAgentContextLLMUsage:
+    def test_record_llm_usage(self, ctx, socketpair):
+        cp_sock, _ = socketpair
+        record = ctx.record_llm_usage(
+            model="gpt-4o-mini",
+            node_name="summarize",
+            prompt_tokens=100,
+            completion_tokens=20,
+            estimated_raw_prompt_tokens=500,
+            estimated_tokens_saved=400,
+            metadata={"rows_processed": 10},
+        )
+
+        data = _recv_message(cp_sock)
+        event = AgentEvent.model_validate_json(data)
+        assert event.type == "llm.usage"
+        assert event.payload["task_id"] == "task1"
+        assert event.payload["model"] == "gpt-4o-mini"
+        assert event.payload["node_name"] == "summarize"
+        assert event.payload["prompt_tokens"] == 100
+        assert event.payload["completion_tokens"] == 20
+        assert event.payload["total_tokens"] == 120
+        assert event.payload["estimated_tokens_saved"] == 400
+        assert event.payload["metadata"]["rows_processed"] == 10
+        assert record.total_tokens == 120
+
+
 class TestAgentContextProperties:
     def test_config(self, ctx):
         assert ctx.config == {"llm": {"model": "test"}}
