@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from switchplane import Task
 from switchplane.agent_runtime import AgentContext
 from switchplane.llm import build_llm
+from switchplane.usage import estimate_text_tokens, llm_usage_from_response
 
 # -- Mock data generation ------------------------------------------------------
 #
@@ -337,18 +338,33 @@ def _strip_json_fences(text: str) -> str:
 class ReviewState(TypedDict):
     current: Any  # pd.DataFrame (not serializable, ephemeral task)
     previous: Any  # pd.DataFrame
+    rows_processed: int
+    estimated_raw_prompt_tokens: int
     analysis: dict | None
     formatted: str
     summary: dict | None
     report: str
 
 
-def _build_graph(llm) -> StateGraph:
+def _build_graph(llm, ctx: AgentContext, model: str) -> StateGraph:
     """Wire the review graph. 3 deterministic nodes, 1 LLM node."""
 
     def fetch_metrics(state: ReviewState) -> dict:
         current, previous = generate_metrics()
-        return {"current": current, "previous": previous}
+        raw_prompt = "\n\n".join(
+            [
+                "CURRENT WEEK RAW METRICS CSV:",
+                current.to_csv(index=False),
+                "PREVIOUS WEEK RAW METRICS CSV:",
+                previous.to_csv(index=False),
+            ]
+        )
+        return {
+            "current": current,
+            "previous": previous,
+            "rows_processed": len(current) + len(previous),
+            "estimated_raw_prompt_tokens": estimate_text_tokens(raw_prompt),
+        }
 
     def analyze_metrics(state: ReviewState) -> dict:
         result = analyze(state["current"], state["previous"])
@@ -356,11 +372,44 @@ def _build_graph(llm) -> StateGraph:
 
     async def summarize(state: ReviewState) -> dict:
         prompt = _ANALYSIS_PROMPT.format(formatted_data=state["formatted"])
-        response = await llm.ainvoke(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        response = await llm.ainvoke(messages)
+        usage = llm_usage_from_response(
+            response,
+            task_id=ctx.task_id,
+            model=model,
+            node_name="summarize",
+            fallback_prompt_text=f"{_SYSTEM_PROMPT}\n\n{prompt}",
+            fallback_completion_text=str(response.content),
+            estimated_raw_prompt_tokens=state["estimated_raw_prompt_tokens"],
+            metadata={
+                "deterministic_nodes": 3,
+                "llm_nodes": 1,
+                "rows_processed": state["rows_processed"],
+                "formatted_prompt_tokens_estimate": estimate_text_tokens(prompt),
+            },
+        )
+        ctx.record_llm_usage(
+            model=usage.model,
+            node_name=usage.node_name,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            estimated_cost_usd=usage.estimated_cost_usd,
+            estimated_raw_prompt_tokens=usage.estimated_raw_prompt_tokens,
+            estimated_tokens_saved=usage.estimated_tokens_saved,
+            metadata=usage.metadata,
+        )
+        ctx.progress(
+            "LLM usage recorded",
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            estimated_cost_usd=usage.estimated_cost_usd,
+            estimated_tokens_saved=usage.estimated_tokens_saved,
         )
         try:
             summary = json.loads(_strip_json_fences(response.content))
@@ -431,16 +480,17 @@ class ReviewTask(Task):
         ctx.progress(f"Starting ops review (model: {model})")
         ctx.progress("Generating mock NewRelic metrics (2 weeks, 5-min granularity)...")
 
-        graph = _build_graph(llm).compile()
-
         initial: ReviewState = {
             "current": None,
             "previous": None,
+            "rows_processed": 0,
+            "estimated_raw_prompt_tokens": 0,
             "analysis": None,
             "formatted": "",
             "summary": None,
             "report": "",
         }
 
+        graph = _build_graph(llm, ctx, model).compile()
         result = await graph.ainvoke(initial)
         ctx.complete(result["report"])

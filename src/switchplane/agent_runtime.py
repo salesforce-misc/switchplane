@@ -21,6 +21,7 @@ import structlog
 
 from switchplane._util import MAX_MESSAGE_SIZE
 from switchplane.protocol import AgentCommand, AgentEvent
+from switchplane.usage import LLMUsageRecord, estimate_cost_usd
 
 _logger = structlog.get_logger()
 
@@ -242,6 +243,41 @@ class AgentContext:
                 ``{"error": ...}`` key signals failure to the CLI/TUI.
         """
         self.emit("task.command_result", {"action": action, "result": result})
+
+    def record_llm_usage(
+        self,
+        *,
+        model: str,
+        node_name: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int | None = None,
+        estimated_cost_usd: float | None = None,
+        estimated_raw_prompt_tokens: int | None = None,
+        estimated_tokens_saved: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> LLMUsageRecord:
+        """Emit a structured ``llm.usage`` event for one model call."""
+
+        total = total_tokens if total_tokens is not None else prompt_tokens + completion_tokens
+        cost = estimated_cost_usd
+        if cost is None:
+            cost = estimate_cost_usd(model, prompt_tokens, completion_tokens)
+
+        record = LLMUsageRecord(
+            task_id=self.task_id,
+            model=model,
+            node_name=node_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            estimated_cost_usd=cost,
+            estimated_raw_prompt_tokens=estimated_raw_prompt_tokens,
+            estimated_tokens_saved=estimated_tokens_saved,
+            metadata=metadata or {},
+        )
+        self.emit("llm.usage", record.model_dump(mode="json"))
+        return record
 
     async def wait_for_input(self, prompt: str | None = None) -> str:
         """Block until the user sends freeform text input.

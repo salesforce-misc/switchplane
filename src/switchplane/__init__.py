@@ -8,5 +8,6 @@ from switchplane import fmt
 from switchplane.app import Application
 from switchplane.shell import Shell
 from switchplane.task import Task, command
+from switchplane.usage import LLMUsageRecord
 
-__all__ = ["Application", "Field", "Shell", "Task", "command", "fmt"]
+__all__ = ["Application", "Field", "LLMUsageRecord", "Shell", "Task", "command", "fmt"]
