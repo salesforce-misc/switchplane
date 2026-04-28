@@ -505,7 +505,9 @@ class Shell:
 
             try:
                 returncode, stdout, stderr = await self._exec(
-                    cmd, cwd=cwd, timeout=effective_timeout,
+                    cmd,
+                    cwd=cwd,
+                    timeout=effective_timeout,
                 )
             except TimeoutError as e:
                 return f"Error: {e}"

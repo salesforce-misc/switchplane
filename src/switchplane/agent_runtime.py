@@ -276,12 +276,15 @@ class AgentContext:
 
         The submitted task is linked to this task as its parent.
         """
-        result = await self._send_request("submit_task", {
-            "agent_name": agent_name,
-            "task_name": task_name,
-            "input": params or {},
-            "parent_task_id": self.task_id,
-        })
+        result = await self._send_request(
+            "submit_task",
+            {
+                "agent_name": agent_name,
+                "task_name": task_name,
+                "input": params or {},
+                "parent_task_id": self.task_id,
+            },
+        )
         return result["task_id"]
 
     async def get_task(self, task_id: str) -> dict[str, Any]:
@@ -336,10 +339,13 @@ class AgentContext:
             task_id: The task to notify.
             payload: Arbitrary JSON-serializable dict delivered as the notification body.
         """
-        await self._send_request("notify_task", {
-            "task_id": task_id,
-            "payload": payload or {},
-        })
+        await self._send_request(
+            "notify_task",
+            {
+                "task_id": task_id,
+                "payload": payload or {},
+            },
+        )
 
     async def wait_for_notification(self, timeout: float | None = None) -> dict[str, Any] | None:
         """Block until a notification arrives or the task is cancelled.
@@ -573,8 +579,13 @@ def _import_task_class(task_module_path: str) -> type:
 
     for name in dir(module):
         obj = getattr(module, name)
-        if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task and getattr(obj, "__module__", None) == module.__name__:
-                return obj
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, Task)
+            and obj is not Task
+            and getattr(obj, "__module__", None) == module.__name__
+        ):
+            return obj
 
     raise RuntimeError(f"No Task subclass found in {task_module_path}")
 

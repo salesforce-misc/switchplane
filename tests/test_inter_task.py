@@ -218,9 +218,7 @@ class TestSendRequest:
     @pytest.mark.asyncio
     async def test_send_request_success(self, socketpair):
         cp_sock, agent_sock = socketpair
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
         async def do_request():
             return await ctx._send_request("get_task", {"task_id": "abc"})
@@ -252,9 +250,7 @@ class TestSendRequest:
     @pytest.mark.asyncio
     async def test_send_request_error_raises(self, socketpair):
         cp_sock, agent_sock = socketpair
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
         async def do_request():
             return await ctx._send_request("get_task", {"task_id": "bad"})
@@ -282,9 +278,7 @@ class TestSendRequest:
     async def test_send_request_default_params(self, socketpair):
         """_send_request with no params sends an empty dict."""
         cp_sock, agent_sock = socketpair
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
         async def do_request():
             return await ctx._send_request("list_tasks")
@@ -297,9 +291,7 @@ class TestSendRequest:
         assert req.params == {}
 
         future = ctx._pending_requests[req.request_id]
-        future.set_result(
-            AgentResponse(request_id=req.request_id, ok=True, result=[])
-        )
+        future.set_result(AgentResponse(request_id=req.request_id, ok=True, result=[]))
         result = await task
         assert result == []
 
@@ -313,9 +305,7 @@ class TestSubmitTask:
     @pytest.mark.asyncio
     async def test_submit_task_sends_parent_task_id(self, socketpair):
         cp_sock, agent_sock = socketpair
-        ctx = AgentContext(
-            task_id="parent1", task_name="orchestrator", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="parent1", task_name="orchestrator", ipc_sock=agent_sock, config={})
 
         async def do_submit():
             return await ctx.submit_task("greeter", "greet", {"whom": "Alice"})
@@ -347,9 +337,7 @@ class TestSubmitTask:
     async def test_submit_task_default_params(self, socketpair):
         """submit_task with no params passes empty input dict."""
         cp_sock, agent_sock = socketpair
-        ctx = AgentContext(
-            task_id="parent2", task_name="orch", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="parent2", task_name="orch", ipc_sock=agent_sock, config={})
 
         async def do_submit():
             return await ctx.submit_task("worker", "noop")
@@ -385,9 +373,7 @@ class TestListenForCommandsResponse:
         reader = asyncio.StreamReader()
 
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
         # Set up a pending request
         loop = asyncio.get_running_loop()
@@ -395,9 +381,7 @@ class TestListenForCommandsResponse:
         ctx._pending_requests["req123"] = future
 
         # Feed a response message into the reader
-        response = AgentResponse(
-            request_id="req123", ok=True, result={"data": "hello"}
-        )
+        response = AgentResponse(request_id="req123", ok=True, result={"data": "hello"})
         payload = response.model_dump_json().encode()
         reader.feed_data(struct.pack(">I", len(payload)) + payload)
         # Feed EOF so _listen_for_commands exits after processing the response
@@ -420,13 +404,9 @@ class TestListenForCommandsResponse:
         reader = asyncio.StreamReader()
 
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
-        response = AgentResponse(
-            request_id="nonexistent", ok=True, result={}
-        )
+        response = AgentResponse(request_id="nonexistent", ok=True, result={})
         payload = response.model_dump_json().encode()
         reader.feed_data(struct.pack(">I", len(payload)) + payload)
         reader.feed_eof()
@@ -444,18 +424,16 @@ class TestListenForCommandsResponse:
         reader = asyncio.StreamReader()
 
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(
-            task_id="t1", task_name="test", ipc_sock=agent_sock, config={}
-        )
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         ctx._pending_requests["req456"] = future
 
         # Feed response
-        resp_payload = AgentResponse(
-            request_id="req456", ok=True, result={"task_id": "child1"}
-        ).model_dump_json().encode()
+        resp_payload = (
+            AgentResponse(request_id="req456", ok=True, result={"task_id": "child1"}).model_dump_json().encode()
+        )
         reader.feed_data(struct.pack(">I", len(resp_payload)) + resp_payload)
 
         # Feed cancel command
@@ -491,11 +469,7 @@ class TestHandleAgentRequest:
         store = Store(tmp_path / "test.db")
         await store.initialize()
 
-        mock_handler = AsyncMock(
-            return_value=CliResponse(
-                id="req1", ok=True, result={"task_id": "new_child"}
-            )
-        )
+        mock_handler = AsyncMock(return_value=CliResponse(id="req1", ok=True, result={"task_id": "new_child"}))
         mgr = SubprocessManager(store, request_handler=mock_handler)
 
         # Set up a real socketpair to capture the response
@@ -719,12 +693,8 @@ class TestCascadeCancellation:
     @pytest.mark.asyncio
     async def test_cancel_cascades_to_children(self, cp):
         # Submit parent and child
-        parent_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        child_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
+        parent_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        child_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
         parent_id = parent_resp.result["task_id"]
         child_id = child_resp.result["task_id"]
 
@@ -748,15 +718,9 @@ class TestCascadeCancellation:
     @pytest.mark.asyncio
     async def test_cancel_cascades_recursively(self, cp):
         # Submit parent, child, grandchild
-        parent_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        child_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        grandchild_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
+        parent_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        child_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        grandchild_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
         parent_id = parent_resp.result["task_id"]
         child_id = child_resp.result["task_id"]
         grandchild_id = grandchild_resp.result["task_id"]
@@ -779,15 +743,9 @@ class TestCascadeCancellation:
     @pytest.mark.asyncio
     async def test_cancel_skips_terminal_children(self, cp):
         # Submit parent and two children
-        parent_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        child_a_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        child_b_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
+        parent_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        child_a_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        child_b_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
         parent_id = parent_resp.result["task_id"]
         child_a_id = child_a_resp.result["task_id"]
         child_b_id = child_b_resp.result["task_id"]
@@ -816,12 +774,8 @@ class TestCascadeCancellation:
     async def test_event_cascade_on_failure(self, cp):
         """Cascade triggers automatically when _on_agent_event receives a task.failed event."""
         # Submit parent and child
-        parent_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
-        child_resp = await _cp_request(
-            cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"}
-        )
+        parent_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
+        child_resp = await _cp_request(cp, "submit_task", {"agent_name": "greeter", "task_name": "noop"})
         parent_id = parent_resp.result["task_id"]
         child_id = child_resp.result["task_id"]
 

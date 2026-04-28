@@ -510,7 +510,7 @@ class TestStartStopMcp:
         )
         await _start_mcp(ctx, [])
         assert ctx._mcp is None  # internal state stays None
-        assert ctx.mcp == {}     # property returns empty dict for safe .get() access
+        assert ctx.mcp == {}  # property returns empty dict for safe .get() access
         agent_sock.close()
 
     @pytest.mark.asyncio

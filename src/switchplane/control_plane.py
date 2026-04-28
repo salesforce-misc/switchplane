@@ -499,13 +499,16 @@ class ControlPlane:
         # Launch agent to execute task with config
         agent_id = await self.subprocess_mgr.launch_agent(agent_spec, task, self.config)
 
-        self._broadcast_system_event("task.created", {
-            "task_id": task.task_id,
-            "agent_name": task.agent_name,
-            "task_name": task.task_name,
-            "status": task.status.value,
-            "parent_task_id": task.parent_task_id,
-        })
+        self._broadcast_system_event(
+            "task.created",
+            {
+                "task_id": task.task_id,
+                "agent_name": task.agent_name,
+                "task_name": task.task_name,
+                "status": task.status.value,
+                "parent_task_id": task.parent_task_id,
+            },
+        )
 
         return CliResponse(
             id=request.id,
@@ -589,7 +592,9 @@ class ControlPlane:
         if children_cancelled:
             logger.info("cascade_cancelled_children", parent=task_id, count=children_cancelled)
 
-        return CliResponse(id=request.id, ok=True, result={"cancelled": cancelled, "children_cancelled": children_cancelled})
+        return CliResponse(
+            id=request.id, ok=True, result={"cancelled": cancelled, "children_cancelled": children_cancelled}
+        )
 
     async def _list_agents(self, request: CliRequest) -> CliResponse:
         """List registered agents with task details."""
