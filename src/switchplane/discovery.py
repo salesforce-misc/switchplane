@@ -140,7 +140,6 @@ def _discover_task(agent_spec: AgentSpec, task_module_path: str) -> None:
         logger.warning("task_module_import_failed", module=task_module_path, error=str(e))
         return
 
-    module_basename = task_module_path.split(".")[-1]
     found = False
 
     for attr_name in dir(task_module):

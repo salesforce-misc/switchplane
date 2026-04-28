@@ -27,7 +27,6 @@ from switchplane.protocol import (
 from switchplane.subprocess_manager import SubprocessManager, _AgentHandle
 from switchplane.task import Task, TaskRecord, TaskStatus
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -501,7 +500,7 @@ class TestHandleAgentRequest:
 
         # Set up a real socketpair to capture the response
         cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        reader, writer = await asyncio.open_connection(sock=cp_sock)
+        _reader, writer = await asyncio.open_connection(sock=cp_sock)
 
         handle = _AgentHandle(
             agent_id="a1",
@@ -551,7 +550,7 @@ class TestHandleAgentRequest:
         mgr = SubprocessManager(store, request_handler=mock_handler)
 
         cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        reader, writer = await asyncio.open_connection(sock=cp_sock)
+        _reader, writer = await asyncio.open_connection(sock=cp_sock)
 
         handle = _AgentHandle(
             agent_id="a1",

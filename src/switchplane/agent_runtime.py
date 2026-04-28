@@ -321,9 +321,8 @@ class AgentContext:
                 if task_record["status"] in terminal:
                     results[tid] = task_record
                     remaining.discard(tid)
-            if remaining:
-                if not await self.sleep(poll_interval):
-                    raise asyncio.CancelledError("Parent task cancelled while waiting for children")
+            if remaining and not await self.sleep(poll_interval):
+                raise asyncio.CancelledError("Parent task cancelled while waiting for children")
         return [results[tid] for tid in task_ids]
 
     async def notify_task(self, task_id: str, payload: dict[str, Any] | None = None) -> None:
@@ -574,8 +573,7 @@ def _import_task_class(task_module_path: str) -> type:
 
     for name in dir(module):
         obj = getattr(module, name)
-        if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task:
-            if getattr(obj, "__module__", None) == module.__name__:
+        if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task and getattr(obj, "__module__", None) == module.__name__:
                 return obj
 
     raise RuntimeError(f"No Task subclass found in {task_module_path}")

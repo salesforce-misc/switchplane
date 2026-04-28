@@ -539,4 +539,4 @@ class Shell:
         write_tools = self.write_tools()
         # write_tools() returns [write_file, edit_file, create_directory];
         # agent_tools only needs the first two.
-        return [self.bash_tool()] + write_tools[:2]
+        return [self.bash_tool(), *write_tools[:2]]
