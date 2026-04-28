@@ -33,6 +33,12 @@ src/switchplane/           # Main package (pip-installable)
 
   mcp.py                   # MCP client lifecycle: McpSession, McpManager, LangChain tool wrapper
 
+  _util.py                 # Shared constants (MAX_MESSAGE_SIZE)
+  llm.py                   # LLM provider routing (ChatAnthropic/OpenAI/Google via model prefix)
+  logging.py               # structlog configuration
+  oauth.py                 # OAuth client for MCP HTTP servers (PKCE flows)
+  scaffold.py              # `switchplane init` project scaffolding
+
 examples/hello/        # Simple LangGraph graph (get_user → say_hello)
 examples/weather/      # Long-running polling task (Open-Meteo weather watch, @command for coordinates)
 examples/devops/       # Ops review: deterministic pandas analysis + LLM summary
@@ -111,7 +117,7 @@ click, pydantic v2, aiosqlite, langgraph, prompt_toolkit, structlog. Optional: `
 
 **CLI ↔ Control Plane:** Unix socket at `~/.{app_name}/runtime.sock`. Messages are 4-byte big-endian length prefix + JSON body. Types: `CliRequest` / `CliResponse`.
 
-**Agent ↔ Control Plane:** Bidirectional over a per-agent Unix socketpair (`socket.socketpair(AF_UNIX)`). The CP creates the pair, passes one fd to the child via `--ipc-fd` + `pass_fds`. Same 4-byte length-prefixed JSON framing as CLI protocol. CP sends `AgentCommand`, agent sends `AgentEvent`. This allows mid-execution cancel/shutdown — the agent runs a command listener concurrently with task execution. stdout/stderr are freed for normal logging.
+**Agent ↔ Control Plane:** Bidirectional over a per-agent Unix socketpair (`socket.socketpair(AF_UNIX)`). The CP creates the pair, passes one fd to the child via `--ipc-fd` + `pass_fds`. Same 4-byte length-prefixed JSON framing as CLI protocol. CP sends `AgentCommand`, agent sends `AgentEvent`. Agents can also send `AgentRequest` to the CP and receive `AgentResponse` — used for cross-task operations (submit, query, notify). This allows mid-execution cancel/shutdown — the agent runs a command listener concurrently with task execution. stdout/stderr are freed for normal logging.
 
 ## Database
 
@@ -124,11 +130,25 @@ SQLite at `~/.{app_name}/state.db` with WAL mode. Tables: `agents`, `tasks`, `ev
 3. Declare parameters as class attributes using `Field()` from `switchplane` (re-exported from Pydantic). Parameters are validated before execution and set as instance attributes.
 4. Implement `async def run(self, ctx: AgentContext)` — access params via `self.<param>`, build a LangGraph `StateGraph`, compile, `ainvoke`, then `ctx.complete(result)`
 5. Optionally add `@command`-decorated methods for runtime commands on long-running tasks. Command parameters are typed and auto-coerced.
-6. Discovery auto-registers the task from the `tasks/` subpackage — no need to declare it in `AgentSpec`
+6. Optionally declare `mcp_servers: ClassVar[list[str]] = ["server-name"]` on the task class to specify which MCP servers the task needs. Only declared servers are started for that task. If not set, all agent-level servers are used.
+7. Discovery auto-registers the task from the `tasks/` subpackage — no need to declare it in `AgentSpec`
 
 ## MCP integration
 
-MCP servers are registered at the app level via `McpServerConfig` (provide `command` for stdio, `url` for HTTP — transport is inferred). Agents declare which servers they need via `AgentSpec.mcp_servers`. The agent runtime manages client lifecycle (spawning stdio processes or connecting to HTTP endpoints) and exposes tools via `ctx.mcp` (raw sessions) and `ctx.mcp_tools()` (LangChain `StructuredTool` wrappers). MCP is an optional dependency: `pip install switchplane[mcp]`.
+MCP servers are registered at the app level via `McpServerConfig` (provide `command` for stdio, `url` for HTTP — transport is inferred). Agents declare which servers they need via `AgentSpec.mcp_servers`. The agent runtime manages client lifecycle (spawning stdio processes or connecting to HTTP endpoints) and exposes tools via `ctx.mcp` (raw sessions) and `ctx.mcp_tools()` (LangChain `StructuredTool` wrappers). MCP is an optional dependency: `pip install switchplane[mcp]`. Tasks can also declare `mcp_servers` at the class level to restrict which servers are started for that specific task (instead of inheriting all servers from the agent).
+
+## Cross-task coordination
+
+Tasks can spawn child tasks, wait for their completion, and send notifications to sibling tasks via `AgentContext`:
+
+- `ctx.submit_task(agent_name, task_name, params)` → submits a child task (linked via `parent_task_id`), returns the new `task_id`
+- `ctx.get_task(task_id)` → returns current task record and events
+- `ctx.wait_for_task(task_id)` → polls until terminal state, returns task record
+- `ctx.wait_for_tasks(task_ids)` → parallel wait on multiple tasks
+- `ctx.notify_task(task_id, payload)` → send a notification to another running task
+- `ctx.wait_for_notification(timeout)` → block until a notification arrives
+
+These requests travel over the existing agent↔CP socketpair as `AgentRequest`/`AgentResponse` messages. The control plane routes submissions and notifications across agents.
 
 ## Checkpoint and resume
 

@@ -521,6 +521,19 @@ agent_spec = AgentSpec(
 )
 ```
 
+**Declare MCP servers on a task (optional):**
+
+Tasks can override the agent-level default by declaring which specific servers they need. Only declared servers are started for that task:
+
+```python
+class MyTask(Task):
+    name = "analyze"
+    mcp_servers = ["my-tools"]  # Only start this server, not all agent servers
+
+    async def run(self, ctx: AgentContext) -> None:
+        tools = await ctx.mcp_tools()  # Only tools from "my-tools"
+```
+
 **Use MCP tools in your task:**
 
 ```python
@@ -624,6 +637,44 @@ llm_with_tools = llm.bind_tools(tools)
 ```
 
 `Shell` uses `asyncio.create_subprocess_exec` (no shell interpretation), so arguments are never passed through a shell. The allowlist and path validation add defense-in-depth when LLM-generated values flow into command arguments.
+
+For a general-purpose shell tool, `bash_tool()` returns a single `StructuredTool` that parses commands with `shlex` and validates against the allowlist. Working directory is locked to `allowed_paths[0]`, output is truncated to `max_output_chars` (default 30,000 characters). `agent_tools()` returns a minimal coding-focused set: bash + write_file + edit_file.
+
+```python
+# General-purpose bash tool
+bash = shell.bash_tool()
+
+# Minimal set for coding agents: bash + write_file + edit_file
+tools = shell.agent_tools()
+```
+
+### Cross-task coordination
+
+Tasks can spawn child tasks, wait for their completion, and send notifications to sibling tasks. Child tasks are linked via `parent_task_id`. Requests travel over the existing agent-CP socketpair as `AgentRequest`/`AgentResponse` messages.
+
+```python
+async def run(self, ctx: AgentContext) -> None:
+    # Spawn a child task (returns immediately with task_id)
+    child_id = await ctx.submit_task("worker", "process", {"chunk": 1})
+
+    # Wait for it to reach a terminal state
+    result = await ctx.wait_for_task(child_id)
+
+    # Or spawn multiple and wait in parallel
+    ids = [
+        await ctx.submit_task("worker", "process", {"chunk": i})
+        for i in range(3)
+    ]
+    results = await ctx.wait_for_tasks(ids)
+
+    # Send a notification to another running task
+    await ctx.notify_task(other_task_id, {"status": "ready"})
+
+    # Block until a notification arrives (or timeout)
+    notification = await ctx.wait_for_notification(timeout=60.0)
+```
+
+`wait_for_task` polls until the child reaches a terminal state (completed, failed, cancelled). `wait_for_notification` wakes immediately when a notification arrives -- useful for event-driven coordination between long-running tasks.
 
 ### Checkpoint and resume
 
