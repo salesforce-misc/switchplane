@@ -61,9 +61,16 @@ class Store:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     workflow_identity_json TEXT,
-                    checkpoint_metadata_json TEXT
+                    checkpoint_metadata_json TEXT,
+                    parent_task_id TEXT
                 )
             """)
+
+            # Migration: add parent_task_id if upgrading from older schema
+            try:
+                await self._db.execute("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT")
+            except Exception:
+                pass  # Column already exists
 
             await self._db.execute("""
                 CREATE TABLE IF NOT EXISTS events (
@@ -95,8 +102,9 @@ class Store:
                 task_id, agent_name, task_name, status,
                 input_json, result_json, error_json,
                 created_at, updated_at,
-                workflow_identity_json, checkpoint_metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                workflow_identity_json, checkpoint_metadata_json,
+                parent_task_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 task.task_id,
@@ -110,6 +118,7 @@ class Store:
                 task.updated_at.isoformat(),
                 task.workflow_identity_json,
                 task.checkpoint_metadata_json,
+                task.parent_task_id,
             ),
         )
         await self._db.commit()
@@ -165,7 +174,8 @@ class Store:
             SELECT task_id, agent_name, task_name, status,
                    input_json, result_json, error_json,
                    created_at, updated_at,
-                   workflow_identity_json, checkpoint_metadata_json
+                   workflow_identity_json, checkpoint_metadata_json,
+                   parent_task_id
             FROM tasks WHERE task_id = ?
         """,
             (task_id,),
@@ -187,6 +197,7 @@ class Store:
             updated_at=datetime.fromisoformat(row[8]),
             workflow_identity_json=row[9],
             checkpoint_metadata_json=row[10],
+            parent_task_id=row[11],
         )
 
     async def list_tasks(self, status: TaskStatus | None = None) -> list[TaskRecord]:
@@ -200,7 +211,8 @@ class Store:
                 SELECT task_id, agent_name, task_name, status,
                        input_json, result_json, error_json,
                        created_at, updated_at,
-                       workflow_identity_json, checkpoint_metadata_json
+                       workflow_identity_json, checkpoint_metadata_json,
+                       parent_task_id
                 FROM tasks WHERE status = ?
                 ORDER BY created_at DESC
             """,
@@ -211,7 +223,8 @@ class Store:
                 SELECT task_id, agent_name, task_name, status,
                        input_json, result_json, error_json,
                        created_at, updated_at,
-                       workflow_identity_json, checkpoint_metadata_json
+                       workflow_identity_json, checkpoint_metadata_json,
+                       parent_task_id
                 FROM tasks ORDER BY created_at DESC
             """)
 
@@ -231,10 +244,48 @@ class Store:
                     updated_at=datetime.fromisoformat(row[8]),
                     workflow_identity_json=row[9],
                     checkpoint_metadata_json=row[10],
+                    parent_task_id=row[11],
                 )
             )
 
         return tasks
+
+    async def get_child_tasks(self, parent_task_id: str) -> list[TaskRecord]:
+        """Get all direct children of a task."""
+        if not self._db:
+            raise RuntimeError("Store not initialized")
+
+        cursor = await self._db.execute(
+            """
+            SELECT task_id, agent_name, task_name, status,
+                   input_json, result_json, error_json,
+                   created_at, updated_at,
+                   workflow_identity_json, checkpoint_metadata_json,
+                   parent_task_id
+            FROM tasks WHERE parent_task_id = ?
+            ORDER BY created_at DESC
+        """,
+            (parent_task_id,),
+        )
+
+        rows = await cursor.fetchall()
+        return [
+            TaskRecord(
+                task_id=row[0],
+                agent_name=row[1],
+                task_name=row[2],
+                status=TaskStatus(row[3]),
+                input_json=row[4],
+                result_json=row[5],
+                error_json=row[6],
+                created_at=datetime.fromisoformat(row[7]),
+                updated_at=datetime.fromisoformat(row[8]),
+                workflow_identity_json=row[9],
+                checkpoint_metadata_json=row[10],
+                parent_task_id=row[11],
+            )
+            for row in rows
+        ]
 
     # Agent methods
 

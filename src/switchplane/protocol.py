@@ -68,6 +68,28 @@ class AgentEvent(BaseModel):
 class AgentCommand(BaseModel):
     """Command from Control Plane to Agent over the IPC socketpair."""
 
-    type: Literal["execute_task", "cancel", "shutdown", "user_command"]
+    type: Literal["execute_task", "cancel", "shutdown", "user_command", "notify"]
     task_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+# Agent ↔ Control Plane Request/Response Protocol
+
+
+class AgentRequest(BaseModel):
+    """Request from Agent to Control Plane over the IPC socketpair."""
+
+    kind: Literal["request"] = "request"
+    request_id: str = Field(default_factory=lambda: uuid4().hex)
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentResponse(BaseModel):
+    """Response from Control Plane to Agent over the IPC socketpair."""
+
+    kind: Literal["response"] = "response"
+    request_id: str
+    ok: bool
+    result: Any = None
+    error: str | None = None

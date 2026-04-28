@@ -51,6 +51,10 @@ class TestParseKvArgs:
         assert action == "cmd"
         assert params == {"key": "val"}
 
+    def test_equals_syntax_preserves_dashes_in_value(self):
+        _, params = _parse_kv_args(["--work-item=W-20948280"], start_index=0)
+        assert params == {"work_item": "W-20948280"}
+
 
 class TestPrintEvent:
     def test_progress(self, capsys):

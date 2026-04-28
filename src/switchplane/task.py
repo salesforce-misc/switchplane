@@ -45,6 +45,7 @@ class TaskRecord(BaseModel):
     updated_at: datetime
     workflow_identity_json: str | None = None
     checkpoint_metadata_json: str | None = None
+    parent_task_id: str | None = None
 
 
 def command(fn):
@@ -123,15 +124,21 @@ class Task(ABC):
 
     @classmethod
     def parameters_model(cls) -> type[BaseModel] | None:
-        """Build a Pydantic model from Field-annotated attributes."""
+        """Build a Pydantic model from Field-annotated attributes.
+
+        Walks the MRO so that subclasses inherit parameter fields from
+        parent Task classes (e.g. ReviewerTask → QualityTask).
+        """
         fields = {}
         base_attrs = set(Task.__annotations__)
-        for attr_name, annotation in cls.__annotations__.items():
-            if attr_name in base_attrs:
-                continue
-            default = getattr(cls, attr_name, ...)
-            if isinstance(default, FieldInfo):
-                fields[attr_name] = (annotation, default)
+        # Walk MRO in reverse so subclass annotations override parents
+        for klass in reversed(cls.__mro__):
+            for attr_name, annotation in getattr(klass, "__annotations__", {}).items():
+                if attr_name in base_attrs:
+                    continue
+                default = getattr(cls, attr_name, ...)
+                if isinstance(default, FieldInfo):
+                    fields[attr_name] = (annotation, default)
         if not fields:
             return None
         return create_model(f"_{cls.__name__}Params", **fields)

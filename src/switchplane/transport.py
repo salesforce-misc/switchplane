@@ -67,16 +67,22 @@ class SocketServer:
 
     async def stop(self) -> None:
         """Stop the server and clean up."""
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
-
-        # Close all active connections
+        # Close active connections first so their transports fully shut down
+        # (setting transport._server = None) before Server.close() clears
+        # _waiters.  This avoids a Python 3.14 regression where a late GC of
+        # _SelectorTransport calls _detach → _wakeup on a None _waiters list.
         for writer in list(self._active_connections):
             writer.close()
             await writer.wait_closed()
         self._active_connections.clear()
+
+        if self.server:
+            self.server.close()
+            # Yield so _force_close callbacks run and clear transport._server
+            # before any __del__ fires.
+            await asyncio.sleep(0)
+            await self.server.wait_closed()
+            self.server = None
 
         # Remove socket file
         if self.sock_path.exists():

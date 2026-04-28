@@ -472,6 +472,17 @@ class TUISession:
                     break
 
                 event = StreamEvent.model_validate_json(data)
+
+                # Handle task.created events — new child tasks spawned by other tasks
+                if event.event_type == "task.created":
+                    p = event.payload
+                    tid = p.get("task_id", "")
+                    if tid and tid not in self.buffers:
+                        self.add_task(tid, p.get("agent_name", ""), p.get("task_name", ""))
+                        self.start_stream(tid)
+                        self._refresh()
+                    continue
+
                 self._render_event(
                     _SYSTEM_TAB_ID,
                     {
@@ -1367,14 +1378,14 @@ def _parse_kv_args(
     while i < len(rest):
         arg = rest[i]
         if arg.startswith("--"):
-            key = arg[2:].replace("-", "_")
-            if "=" in key:
-                k, v = key.split("=", 1)
-                params[k] = v
+            raw = arg[2:]
+            if "=" in raw:
+                k, v = raw.split("=", 1)
+                params[k.replace("-", "_")] = v
             elif i + 1 < len(rest) and not rest[i + 1].startswith("--"):
-                params[key] = rest[i + 1]
+                params[raw.replace("-", "_")] = rest[i + 1]
                 i += 1
             else:
-                params[key] = True
+                params[raw.replace("-", "_")] = True
         i += 1
     return action, params

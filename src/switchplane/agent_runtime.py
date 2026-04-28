@@ -9,6 +9,7 @@ bidirectional over a Unix socketpair passed via --ipc-fd, using
 import argparse
 import asyncio
 import importlib
+import json
 import logging as _logging
 import os
 import socket
@@ -20,7 +21,7 @@ from typing import Any
 import structlog
 
 from switchplane._util import MAX_MESSAGE_SIZE
-from switchplane.protocol import AgentCommand, AgentEvent
+from switchplane.protocol import AgentCommand, AgentEvent, AgentRequest, AgentResponse
 
 _logger = structlog.get_logger()
 
@@ -133,6 +134,8 @@ class AgentContext:
         self._checkpointer: Any = None
         self._db_conn: Any = None
         self._task: Any = None
+        self._pending_requests: dict[str, asyncio.Future] = {}
+        self._notification_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     @property
     def runtime_dir(self) -> Path:
@@ -142,7 +145,9 @@ class AgentContext:
 
     @property
     def mcp(self):
-        """Access MCP sessions. Returns McpManager or None if no MCP servers configured."""
+        """Access MCP sessions. Returns McpManager or empty dict if no MCP servers configured."""
+        if self._mcp is None:
+            return {}
         return self._mcp
 
     async def mcp_tools(self) -> dict[str, Any]:
@@ -243,6 +248,135 @@ class AgentContext:
         """
         self.emit("task.command_result", {"action": action, "result": result})
 
+    async def _send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        """Send a request to the control plane and wait for the response.
+
+        Raises RuntimeError if the control plane returns an error.
+        """
+        request = AgentRequest(method=method, params=params or {})
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self._pending_requests[request.request_id] = future
+        try:
+            _write_message_sync(self._sock, request.model_dump_json().encode())
+            response = await future
+        finally:
+            self._pending_requests.pop(request.request_id, None)
+        if not response.ok:
+            raise RuntimeError(f"Control plane error: {response.error}")
+        return response.result
+
+    async def submit_task(
+        self,
+        agent_name: str,
+        task_name: str,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """Submit a new task for execution, returns the task_id.
+
+        The submitted task is linked to this task as its parent.
+        """
+        result = await self._send_request(
+            "submit_task",
+            {
+                "agent_name": agent_name,
+                "task_name": task_name,
+                "input": params or {},
+                "parent_task_id": self.task_id,
+            },
+        )
+        return result["task_id"]
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        """Get the current state of a task.
+
+        Returns a dict with 'task' (task record) and 'events' keys.
+        """
+        return await self._send_request("get_task", {"task_id": task_id})
+
+    async def wait_for_task(self, task_id: str, poll_interval: float = 10) -> dict[str, Any]:
+        """Poll until a task reaches a terminal state, then return its record.
+
+        Terminal states: completed, failed, cancelled.
+        Returns the task record dict.
+        """
+        terminal = {"completed", "failed", "cancelled"}
+        while True:
+            result = await self._send_request("get_task", {"task_id": task_id})
+            task_record = result["task"]
+            if task_record["status"] in terminal:
+                return task_record
+            if not await self.sleep(poll_interval):
+                raise asyncio.CancelledError("Parent task cancelled while waiting for child")
+
+    async def wait_for_tasks(self, task_ids: list[str], poll_interval: float = 10) -> list[dict[str, Any]]:
+        """Poll until all tasks reach terminal states, then return their records.
+
+        Returns task records in the same order as the input task_ids.
+        """
+        results: dict[str, dict[str, Any]] = {}
+        terminal = {"completed", "failed", "cancelled"}
+        remaining = set(task_ids)
+        while remaining:
+            for tid in list(remaining):
+                result = await self._send_request("get_task", {"task_id": tid})
+                task_record = result["task"]
+                if task_record["status"] in terminal:
+                    results[tid] = task_record
+                    remaining.discard(tid)
+            if remaining and not await self.sleep(poll_interval):
+                raise asyncio.CancelledError("Parent task cancelled while waiting for children")
+        return [results[tid] for tid in task_ids]
+
+    async def notify_task(self, task_id: str, payload: dict[str, Any] | None = None) -> None:
+        """Send a notification to another running task.
+
+        The notification is delivered to the target task's notification
+        queue.  If the target is blocked in ``wait_for_notification()``,
+        it wakes up immediately.
+
+        Args:
+            task_id: The task to notify.
+            payload: Arbitrary JSON-serializable dict delivered as the notification body.
+        """
+        await self._send_request(
+            "notify_task",
+            {
+                "task_id": task_id,
+                "payload": payload or {},
+            },
+        )
+
+    async def wait_for_notification(self, timeout: float | None = None) -> dict[str, Any] | None:
+        """Block until a notification arrives or the task is cancelled.
+
+        Returns the notification payload dict, or ``None`` if cancelled
+        or timed out.
+        """
+        try:
+            if timeout is not None:
+                return await asyncio.wait_for(
+                    self._wait_notification_or_cancel(),
+                    timeout=timeout,
+                )
+            return await self._wait_notification_or_cancel()
+        except (TimeoutError, asyncio.CancelledError):
+            return None
+
+    async def _wait_notification_or_cancel(self) -> dict[str, Any] | None:
+        """Wait for either a notification or cancellation."""
+        cancel_task = asyncio.create_task(self._cancelled.wait())
+        notify_task = asyncio.create_task(self._notification_queue.get())
+        done, pending = await asyncio.wait(
+            {cancel_task, notify_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        if notify_task in done:
+            return notify_task.result()
+        return None
+
     async def wait_for_input(self, prompt: str | None = None) -> str:
         """Block until the user sends freeform text input.
 
@@ -321,8 +455,18 @@ async def _listen_for_commands(
     try:
         while True:
             data = await _read_message(reader)
+
+            # Check if this is a response to a pending request
+            raw = json.loads(data)
+            if raw.get("kind") == "response":
+                response = AgentResponse.model_validate(raw)
+                future = ctx._pending_requests.get(response.request_id)
+                if future and not future.done():
+                    future.set_result(response)
+                continue
+
             try:
-                command = AgentCommand.model_validate_json(data)
+                command = AgentCommand.model_validate(raw)
             except Exception:
                 _logger.warning("malformed_command", data=data[:200])
                 continue
@@ -339,6 +483,8 @@ async def _listen_for_commands(
                 case "user_command":
                     # Put the command payload onto the command queue
                     await ctx._command_queue.put(command.payload)
+                case "notify":
+                    await ctx._notification_queue.put(command.payload)
     except (asyncio.IncompleteReadError, ConnectionError, OSError):
         pass  # Socket closed — control plane is gone, task will finish or be orphaned
 
@@ -395,9 +541,19 @@ async def _start_mcp(ctx: AgentContext, mcp_configs: list[dict[str, Any]]) -> No
     for err in errors:
         _logger.error("mcp_server_start_failed", error=err)
 
-    if len(errors) == len(configs):
+    if errors:
         await manager.stop()
-        raise RuntimeError(f"All MCP servers failed to start: {'; '.join(errors)}")
+        failed_names = []
+        for err in errors:
+            for c in configs:
+                if c.name in err:
+                    failed_names.append(c.name)
+                    break
+        names = ", ".join(failed_names) if failed_names else "unknown"
+        raise RuntimeError(
+            f"MCP server(s) failed to start ({names}): {'; '.join(errors)}. "
+            f"Check authentication with 'auth login' for the failed server(s)."
+        )
 
     ctx._mcp = manager
 
@@ -412,14 +568,23 @@ async def _stop_mcp(ctx: AgentContext) -> None:
 
 
 def _import_task_class(task_module_path: str) -> type:
-    """Import the module at *task_module_path* and return the Task subclass."""
+    """Import the module at *task_module_path* and return the Task subclass.
+
+    Only considers classes defined in the module itself (not imported base
+    classes), matching the discovery logic in ``discovery.py``.
+    """
     module = importlib.import_module(task_module_path)
 
     from switchplane.task import Task
 
     for name in dir(module):
         obj = getattr(module, name)
-        if isinstance(obj, type) and issubclass(obj, Task) and obj is not Task:
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, Task)
+            and obj is not Task
+            and getattr(obj, "__module__", None) == module.__name__
+        ):
             return obj
 
     raise RuntimeError(f"No Task subclass found in {task_module_path}")

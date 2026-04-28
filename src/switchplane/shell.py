@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import shlex
 from pathlib import Path
 
 import structlog
@@ -17,6 +18,7 @@ class Shell:
         allowed_paths: list[Path],
         allowed_commands: list[str],
         timeout: float = 30.0,
+        max_output_chars: int = 30_000,
     ):
         """Initialize Shell with security guardrails.
 
@@ -24,10 +26,12 @@ class Shell:
             allowed_paths: Directories the shell is allowed to operate within.
             allowed_commands: Binary names that can be executed (e.g., ["git", "gh", "rg"]).
             timeout: Default timeout in seconds for each invocation.
+            max_output_chars: Maximum characters returned from bash_tool output.
         """
         self.allowed_paths = [p.resolve() for p in allowed_paths]
         self.allowed_commands = allowed_commands
         self.default_timeout = timeout
+        self.max_output_chars = max_output_chars
 
     def validate_path(self, path: str) -> Path:
         """Validate a path is within allowed directories.
@@ -239,7 +243,7 @@ class Shell:
             args_schema=args_schema,
         )
 
-    _FS_COMMANDS = frozenset({"ls", "head", "find", "grep"})
+    _FS_COMMANDS = frozenset({"ls", "find", "grep"})
 
     def fs_tools(self) -> list:
         """Create standard filesystem tools for LLM use.
@@ -247,7 +251,7 @@ class Shell:
         Returns a list of LangChain StructuredTools: list_directory, read_file,
         search_files, grep_files.
 
-        Requires 'ls', 'head', 'find', 'grep' in allowed_commands.
+        Requires 'ls', 'find', 'grep' in allowed_commands.
         """
         missing = self._FS_COMMANDS - set(self.allowed_commands)
         if missing:
@@ -270,11 +274,42 @@ class Shell:
             path_params={"path"},
         )
 
-        read_file = self.as_tool(
+        _read_schema = create_model(
+            "read_file_Args",
+            file_path=(str, FieldInfo(description="Path to the file to read")),
+            offset=(int, FieldInfo(default=1, description="1-based line number to start reading from")),
+            limit=(int, FieldInfo(default=5000, description="Maximum number of lines to return")),
+        )
+
+        async def _read_invoke(file_path: str, offset: int = 1, limit: int = 5000) -> str:
+            try:
+                resolved = self.validate_path(file_path)
+            except PermissionError as e:
+                return f"Error: {e}"
+            if not resolved.is_file():
+                return f"Error: File not found: {resolved}"
+            try:
+                with open(resolved) as f:
+                    lines = f.readlines()
+            except Exception as e:
+                return f"Error: Failed to read file: {e}"
+            # offset is 1-based; clamp to valid range
+            start = max(offset, 1) - 1
+            selected = lines[start : start + limit]
+            numbered = []
+            for i, line in enumerate(selected, start=start + 1):
+                numbered.append(f"{i:>6}\t{line.rstrip()}")
+            return "\n".join(numbered)
+
+        read_file = StructuredTool.from_function(
+            coroutine=_read_invoke,
             name="read_file",
-            cmd_template=["head", "-n", "5000", "{file_path}"],
-            description="Read file contents (first 5000 lines).",
-            path_params={"file_path"},
+            description=(
+                "Read file contents with line numbers. "
+                "Optionally pass offset (1-based start line) and limit (max lines) "
+                "to read a specific range — useful after finding a location via grep."
+            ),
+            args_schema=_read_schema,
         )
 
         search_files = self.as_tool(
@@ -353,6 +388,43 @@ class Shell:
             args_schema=_write_schema,
         )
 
+        # edit_file tool
+        _edit_schema = create_model(
+            "edit_file_Args",
+            file_path=(str, FieldInfo(description="Path to file to edit")),
+            old_text=(str, FieldInfo(description="Exact text to find in the file")),
+            new_text=(str, FieldInfo(description="Text to replace old_text with")),
+        )
+
+        async def _edit_invoke(file_path: str, old_text: str, new_text: str) -> str:
+            try:
+                resolved = self.validate_path(file_path)
+                if not resolved.is_file():
+                    return f"Error: File not found: {resolved}"
+                content = resolved.read_text()
+                count = content.count(old_text)
+                if count == 0:
+                    return "Error: old_text not found in file"
+                if count > 1:
+                    return f"Error: old_text matches {count} locations; must be unique"
+                resolved.write_text(content.replace(old_text, new_text, 1))
+                return f"Successfully edited {resolved}"
+            except PermissionError as e:
+                return f"Error: {e}"
+            except Exception as e:
+                return f"Error: Failed to edit file: {e}"
+
+        edit_file = StructuredTool.from_function(
+            coroutine=_edit_invoke,
+            name="edit_file",
+            description=(
+                "Edit a file by replacing an exact text match. Use this for targeted edits "
+                "instead of rewriting the entire file with write_file. Fails if old_text is "
+                "not found or matches multiple locations."
+            ),
+            args_schema=_edit_schema,
+        )
+
         # create_directory tool
         _mkdir_schema = create_model(
             "create_directory_Args",
@@ -376,7 +448,7 @@ class Shell:
             args_schema=_mkdir_schema,
         )
 
-        return [write_file, create_directory]
+        return [write_file, edit_file, create_directory]
 
     def code_tools(self) -> list:
         """Create combined filesystem read/write tools for LLM coding tasks.
@@ -384,3 +456,89 @@ class Shell:
         Returns fs_tools() + write_tools() - a complete set for code manipulation.
         """
         return self.fs_tools() + self.write_tools()
+
+    def bash_tool(self):
+        """Create a general-purpose bash tool for LLM use.
+
+        Returns a single LangChain StructuredTool that executes shell commands
+        with validation against the command allowlist. CWD is locked to
+        allowed_paths[0]. Output is truncated to max_output_chars.
+        """
+        try:
+            from langchain_core.tools import StructuredTool
+        except ImportError:
+            raise ImportError(
+                "langchain-core is required for bash_tool(). Install with: pip install switchplane[mcp]"
+            ) from None
+
+        from pydantic import create_model
+        from pydantic.fields import FieldInfo
+
+        _bash_schema = create_model(
+            "bash_Args",
+            command=(str, FieldInfo(description="Shell command to execute")),
+            timeout=(
+                int,
+                FieldInfo(
+                    default=int(self.default_timeout),
+                    description="Timeout in seconds",
+                ),
+            ),
+        )
+
+        async def _bash_invoke(command: str, timeout: int | None = None) -> str:
+            try:
+                cmd = shlex.split(command)
+            except ValueError as e:
+                return f"Error: Failed to parse command: {e}"
+
+            if not cmd:
+                return "Error: Empty command"
+
+            try:
+                self._validate_command(cmd)
+            except (PermissionError, ValueError) as e:
+                return f"Error: {e}"
+
+            effective_timeout = float(timeout) if timeout is not None else self.default_timeout
+            cwd = self.allowed_paths[0]
+
+            try:
+                returncode, stdout, stderr = await self._exec(
+                    cmd,
+                    cwd=cwd,
+                    timeout=effective_timeout,
+                )
+            except TimeoutError as e:
+                return f"Error: {e}"
+
+            parts = []
+            if returncode != 0:
+                parts.append(f"Exit code: {returncode}")
+            if stdout:
+                parts.append(stdout)
+            if stderr:
+                parts.append(f"\nSTDERR:\n{stderr}")
+
+            output = "\n".join(parts) if parts else ""
+            if len(output) > self.max_output_chars:
+                output = output[: self.max_output_chars] + "\n... [truncated]"
+            return output
+
+        return StructuredTool.from_function(
+            coroutine=_bash_invoke,
+            name="bash",
+            description=(
+                "Execute a shell command. The command is parsed with shlex and "
+                "validated against the allowed command list. Working directory "
+                f"is {self.allowed_paths[0]}."
+            ),
+            args_schema=_bash_schema,
+        )
+
+    def agent_tools(self) -> list:
+        """Minimal tool surface for LLM coding agents: bash + write_file + edit_file."""
+        write_tools = self.write_tools()
+        # write_tools() returns [write_file, edit_file, create_directory];
+        # agent_tools only needs the first two.
+        return [self.bash_tool(), *write_tools[:2]]

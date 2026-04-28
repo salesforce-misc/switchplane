@@ -173,6 +173,10 @@ class McpManager:
             raise KeyError(f"MCP server '{name}' not found")
         return self._sessions[name]
 
+    def get(self, name: str, default=None) -> McpSession | None:
+        """Get an MCP session by server name, returning *default* if not found."""
+        return self._sessions.get(name, default)
+
     async def start(self) -> list[str]:
         """Start all MCP sessions. Returns a list of error messages for sessions that failed."""
         self._stack = AsyncExitStack()
