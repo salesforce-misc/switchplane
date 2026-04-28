@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import shlex
 from pathlib import Path
 
 import structlog
@@ -17,6 +18,7 @@ class Shell:
         allowed_paths: list[Path],
         allowed_commands: list[str],
         timeout: float = 30.0,
+        max_output_chars: int = 30_000,
     ):
         """Initialize Shell with security guardrails.
 
@@ -24,10 +26,12 @@ class Shell:
             allowed_paths: Directories the shell is allowed to operate within.
             allowed_commands: Binary names that can be executed (e.g., ["git", "gh", "rg"]).
             timeout: Default timeout in seconds for each invocation.
+            max_output_chars: Maximum characters returned from bash_tool output.
         """
         self.allowed_paths = [p.resolve() for p in allowed_paths]
         self.allowed_commands = allowed_commands
         self.default_timeout = timeout
+        self.max_output_chars = max_output_chars
 
     def validate_path(self, path: str) -> Path:
         """Validate a path is within allowed directories.
@@ -452,3 +456,87 @@ class Shell:
         Returns fs_tools() + write_tools() - a complete set for code manipulation.
         """
         return self.fs_tools() + self.write_tools()
+
+    def bash_tool(self):
+        """Create a general-purpose bash tool for LLM use.
+
+        Returns a single LangChain StructuredTool that executes shell commands
+        with validation against the command allowlist. CWD is locked to
+        allowed_paths[0]. Output is truncated to max_output_chars.
+        """
+        try:
+            from langchain_core.tools import StructuredTool
+        except ImportError:
+            raise ImportError(
+                "langchain-core is required for bash_tool(). Install with: pip install switchplane[mcp]"
+            ) from None
+
+        from pydantic import create_model
+        from pydantic.fields import FieldInfo
+
+        _bash_schema = create_model(
+            "bash_Args",
+            command=(str, FieldInfo(description="Shell command to execute")),
+            timeout=(
+                int,
+                FieldInfo(
+                    default=int(self.default_timeout),
+                    description="Timeout in seconds",
+                ),
+            ),
+        )
+
+        async def _bash_invoke(command: str, timeout: int | None = None) -> str:
+            try:
+                cmd = shlex.split(command)
+            except ValueError as e:
+                return f"Error: Failed to parse command: {e}"
+
+            if not cmd:
+                return "Error: Empty command"
+
+            try:
+                self._validate_command(cmd)
+            except (PermissionError, ValueError) as e:
+                return f"Error: {e}"
+
+            effective_timeout = float(timeout) if timeout is not None else self.default_timeout
+            cwd = self.allowed_paths[0]
+
+            try:
+                returncode, stdout, stderr = await self._exec(
+                    cmd, cwd=cwd, timeout=effective_timeout,
+                )
+            except TimeoutError as e:
+                return f"Error: {e}"
+
+            parts = []
+            if returncode != 0:
+                parts.append(f"Exit code: {returncode}")
+            if stdout:
+                parts.append(stdout)
+            if stderr:
+                parts.append(f"\nSTDERR:\n{stderr}")
+
+            output = "\n".join(parts) if parts else ""
+            if len(output) > self.max_output_chars:
+                output = output[: self.max_output_chars] + "\n... [truncated]"
+            return output
+
+        return StructuredTool.from_function(
+            coroutine=_bash_invoke,
+            name="bash",
+            description=(
+                "Execute a shell command. The command is parsed with shlex and "
+                "validated against the allowed command list. Working directory "
+                f"is {self.allowed_paths[0]}."
+            ),
+            args_schema=_bash_schema,
+        )
+
+    def agent_tools(self) -> list:
+        """Minimal tool surface for LLM coding agents: bash + write_file + edit_file."""
+        write_tools = self.write_tools()
+        # write_tools() returns [write_file, edit_file, create_directory];
+        # agent_tools only needs the first two.
+        return [self.bash_tool()] + write_tools[:2]
