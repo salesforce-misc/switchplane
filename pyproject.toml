@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "switchplane"
-version = "0.1.0"
+version = "0.3.0"
 description = "Python runtime control plane for agent-based task execution, LangGraph-native"
 readme = "README.md"
 license = {text = "Apache-2.0"}
