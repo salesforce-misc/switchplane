@@ -8,6 +8,7 @@ build/
 
 # Virtual environment
 .venv/
+venv/
 
 # uv
 uv.lock

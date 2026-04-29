@@ -21,10 +21,10 @@ classifiers = [
 dependencies = [
     "click>=8.3,<9",
     "pydantic>=2.0,<3",
-    "aiosqlite>=0.20",
-    "langgraph>=1.0",
-    "prompt_toolkit>=3.0",
-    "structlog>=24.0",
+    "aiosqlite>=0.20,<1",
+    "langgraph>=1.0,<2",
+    "prompt_toolkit>=3.0,<4",
+    "structlog>=24.0,<25",
 ]
 
 [project.scripts]
@@ -36,8 +36,8 @@ Repository = "https://github.com/salesforce-misc/switchplane"
 Issues = "https://github.com/salesforce-misc/switchplane/issues"
 
 [project.optional-dependencies]
-llm = ["langchain-core>=0.3"]
-mcp = ["mcp>=1.0", "switchplane[llm]"]
+llm = ["langchain-core>=0.3,<2"]
+mcp = ["mcp>=1.0,<2", "switchplane[llm]"]
 test = ["pytest>=7.0", "pytest-asyncio>=0.23", "pytest-cov>=4.0", "pytest-xdist>=3.5", "ruff>=0.9"]
 
 [tool.hatch.build.targets.wheel]

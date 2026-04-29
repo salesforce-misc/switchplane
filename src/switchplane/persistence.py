@@ -10,6 +10,20 @@ import aiosqlite
 from switchplane.agent import AgentRecord
 from switchplane.task import TaskRecord, TaskStatus
 
+# Valid status transitions. Keys are the current status; values are the set of
+# statuses that may follow. Any transition not listed here is rejected.
+_VALID_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.PENDING: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.FAILED}),
+    TaskStatus.RUNNING: frozenset(
+        {TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED}
+    ),
+    TaskStatus.INTERRUPTED: frozenset({TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
+    # Terminal states can only transition to PENDING (resume flow).
+    TaskStatus.COMPLETED: frozenset({TaskStatus.PENDING}),
+    TaskStatus.FAILED: frozenset({TaskStatus.PENDING}),
+    TaskStatus.CANCELLED: frozenset({TaskStatus.PENDING}),
+}
+
 
 class Store:
     """Async SQLite store for control plane persistence."""
@@ -127,6 +141,16 @@ class Store:
         """Update specific fields of a task, auto-setting updated_at."""
         if not self._db:
             raise RuntimeError("Store not initialized")
+
+        if "status" in fields and isinstance(fields["status"], TaskStatus):
+            new_status: TaskStatus = fields["status"]
+            cursor = await self._db.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,))
+            row = await cursor.fetchone()
+            if row:
+                current_status = TaskStatus(row[0])
+                allowed = _VALID_TRANSITIONS.get(current_status, frozenset())
+                if new_status not in allowed:
+                    raise ValueError(f"Invalid task status transition: {current_status} → {new_status}")
 
         # Build the SET clause dynamically
         set_parts = []
