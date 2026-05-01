@@ -5,7 +5,7 @@ function Footer() {
         <span className="font-mono text-sm font-semibold text-gray-400">
           switchplane
         </span>
-        <span className="text-sm text-gray-500">MIT License</span>
+        <span className="text-sm text-gray-500">Apache License 2.0</span>
       </div>
     </footer>
   );
