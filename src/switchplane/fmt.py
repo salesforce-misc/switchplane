@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 
 # Semantic style names — consumers map these to their output format
-TS = "ts"
+TS = "ts"  # kept for backward compat; no longer emitted
 INFO = "info"
 DIM = "dim"
 PROGRESS = "progress"
@@ -12,6 +12,10 @@ SUCCESS = "success"
 WARN = "warn"
 ERROR = "error"
 LOG = "log"
+STREAM = "stream"
+TOOL = "tool"
+
+_MAX_DETAIL_LINES = 20
 
 
 @dataclass
@@ -28,15 +32,13 @@ def render_event(event: dict) -> list[EventLine]:
     style constants defined in this module. Consumers map these to
     their output format (click.echo, prompt_toolkit styled tuples, etc.).
     """
-    raw_ts = event.get("timestamp", "")
-    ts = raw_ts.split("T")[1].split(".")[0] if "T" in raw_ts else raw_ts
     etype = event.get("event_type", "")
     payload = event.get("payload", {})
 
     lines: list[EventLine] = []
 
     def main_line(style: str, msg: str) -> None:
-        lines.append(EventLine([(TS, f"[{ts}] "), (style, msg)]))
+        lines.append(EventLine([(style, msg)]))
 
     def continuation(style: str, text: str) -> None:
         lines.append(EventLine([(style, f"  {text}")]))
@@ -49,8 +51,14 @@ def render_event(event: dict) -> list[EventLine]:
         main_line(PROGRESS, parts[0])
         for cont in parts[1:]:
             continuation(PROGRESS, cont)
-        for det in tree(payload.get("detail", [])):
-            continuation(DIM, det)
+        detail_lines = tree(payload.get("detail", []))
+        if len(detail_lines) > _MAX_DETAIL_LINES:
+            for det in detail_lines[:_MAX_DETAIL_LINES]:
+                continuation(DIM, det)
+            continuation(DIM, f"[+{len(detail_lines) - _MAX_DETAIL_LINES} lines]")
+        else:
+            for det in detail_lines:
+                continuation(DIM, det)
     elif etype == "task.completed":
         main_line(SUCCESS, "Task completed")
     elif etype == "task.cancelled":
@@ -86,6 +94,20 @@ def render_event(event: dict) -> list[EventLine]:
         main_line(style, parts[0])
         for cont in parts[1:]:
             continuation(style, cont)
+    elif etype == "tool.invoke":
+        name = payload.get("name", "unknown")
+        summary = payload.get("summary", "")
+        if summary:
+            main_line(TOOL, f"\u25b8 {name}: {summary}")
+        else:
+            main_line(TOOL, f"\u25b8 {name}")
+    elif etype == "tool.result":
+        name = payload.get("name", "unknown")
+        summary = payload.get("summary", "")
+        if summary:
+            main_line(TOOL, f"\u25c2 {name}: {summary}")
+        else:
+            main_line(TOOL, f"\u25c2 {name}")
     elif etype == "task.command_result":
         action = payload.get("action", "unknown")
         result = payload.get("result", {})

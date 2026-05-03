@@ -67,7 +67,7 @@ class ChatTask(Task):
         # First turn: LLM responds to "Hello!", then graph interrupts at wait_for_user
         result = await graph.ainvoke(initial_state, config)
         last_msg = result["messages"][-1]
-        ctx.progress(f"Assistant: {last_msg.content}")
+        ctx.stream_flush(last_msg.content)
 
         # Chat loop
         while not self._ending:
@@ -78,6 +78,6 @@ class ChatTask(Task):
             # Resume the graph: wait_for_user returns with user text, then respond runs
             result = await graph.ainvoke(Command(resume=user_input), config)
             last_msg = result["messages"][-1]
-            ctx.progress(f"Assistant: {last_msg.content}")
+            ctx.stream_flush(last_msg.content)
 
         ctx.complete({"turns": len(result.get("messages", [])) // 2})

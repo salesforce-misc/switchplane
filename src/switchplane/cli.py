@@ -590,6 +590,31 @@ def _follow_task(task_id: str, send_request) -> None:
 
 def _print_event(event: dict) -> None:
     """Format and print a single event using the shared renderer."""
+    etype = event.get("event_type", "")
+
+    # stream.chunk: print inline without newline
+    if etype == "stream.chunk":
+        text = event.get("payload", {}).get("text", "")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+
+    # stream.flush: end the streaming line, then render final text as markdown
+    if etype == "stream.flush":
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        text = event.get("payload", {}).get("text", "")
+        if text.strip():
+            try:
+                from rich.console import Console as RichConsole
+                from rich.markdown import Markdown
+
+                RichConsole().print(Markdown(text))
+            except ImportError:
+                for part in text.split("\n"):
+                    click.echo(f"  {part}")
+        return
+
     for line in fmt.render_event(event):
         text = "".join(seg[1] for seg in line.segments)
         is_dim = all(s in (fmt.DIM, fmt.TS) for s, _ in line.segments)

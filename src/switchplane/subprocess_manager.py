@@ -307,6 +307,10 @@ class SubprocessManager:
 
     async def _handle_event(self, event: AgentEvent) -> int:
         """Process an event from an agent and update persistence. Returns event_id."""
+        # stream.chunk events are ephemeral — skip DB persistence
+        if event.type == "stream.chunk":
+            return 0
+
         event_id = await self.store.add_event(event.task_id, event.type, event.payload)
 
         match event.type:
