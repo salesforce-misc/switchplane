@@ -515,7 +515,10 @@ class TestGetTabBarText:
         flat = [(s, t) for s, t in text]
         labels = [t for _s, t in flat]
         assert any("agent/task" in lbl for lbl in labels)
-        assert any("●" in lbl for lbl in labels)
+        # Running tasks show a spinner frame instead of a static icon
+        from switchplane.tui import _SPINNER_FRAMES
+
+        assert any(any(c in lbl for c in _SPINNER_FRAMES) for lbl in labels)
 
     def test_task_tab_without_agent_name(self, session):
         session.add_task("t1", "", "task")

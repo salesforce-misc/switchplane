@@ -22,7 +22,6 @@ import asyncio
 import json
 import struct
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +41,18 @@ from switchplane import fmt
 from switchplane.protocol import CliRequest, CliResponse, StreamEvent
 from switchplane.transport import ControlPlaneClient
 
+try:
+    from io import StringIO
+
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+    from rich.console import Console as _RichConsole
+    from rich.markdown import Markdown as _RichMarkdown
+    from rich.theme import Theme as _RichTheme
+
+    _RICH_AVAILABLE = True
+except ImportError:
+    _RICH_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Style class name constants
 # ---------------------------------------------------------------------------
@@ -56,6 +67,8 @@ _S_LOG = "class:event.log"
 _S_SYSTEM = "class:event.system"
 _S_RESULT = "class:event.result"
 _S_TS = "class:event.ts"
+_S_STREAM = "class:event.stream"
+_S_TOOL = "class:event.tool"
 
 _STYLE_MAP: dict[str, str] = {
     fmt.TS: _S_TS,
@@ -66,6 +79,8 @@ _STYLE_MAP: dict[str, str] = {
     fmt.WARN: _S_WARN,
     fmt.ERROR: _S_ERROR,
     fmt.LOG: _S_LOG,
+    fmt.STREAM: _S_STREAM,
+    fmt.TOOL: _S_TOOL,
 }
 
 # ---------------------------------------------------------------------------
@@ -85,7 +100,11 @@ _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _HEARTBEAT_INTERVAL = 60  # seconds — must be well under daemon's IDLE_TIMEOUT (300s)
 _SYSTEM_TAB_ID = "_system"
 _DEFAULT_MAX_BUFFER_LINES = 10_000
-_TS_COL_WIDTH = 11  # "[HH:MM:SS] " = 11 characters
+_LINE_PREFIX = "  "  # Left margin for event lines
+_LINE_PREFIX_WIDTH = len(_LINE_PREFIX)
+
+# Spinner frames for active tasks (braille dots)
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -104,6 +123,78 @@ class EventBuffer:
     lines: list[tuple[StyleAndTextTuples, StyleAndTextTuples]] = field(default_factory=list)
     auto_scroll: bool = True
     vertical_scroll: int = 0  # saved scroll position (physical rows) for tab restoration
+    pending_text: str = ""  # Accumulated streaming text (ephemeral)
+    streaming: bool = False  # Whether we're in a streaming sequence
+    last_event_type: str = ""  # Last rendered event type, for visual grouping
+    _cached_pending: str = ""  # Last pending_text that was rendered
+    _cached_pending_tuples: list = field(default_factory=list)  # Cached render result
+
+
+# ---------------------------------------------------------------------------
+# Markdown rendering via Rich → ANSI → prompt_toolkit (optional)
+# ---------------------------------------------------------------------------
+
+_RICH_THEME = None
+
+
+def _get_rich_theme():
+    global _RICH_THEME
+    if _RICH_THEME is None:
+        _RICH_THEME = _RichTheme(
+            {
+                "markdown.code": "dim cyan",
+                "markdown.code_block": "dim cyan",
+                "markdown.h1": "bold",
+                "markdown.h2": "bold",
+                "markdown.h3": "bold",
+                "markdown.h4": "bold dim",
+                "markdown.h5": "dim",
+                "markdown.block_quote": "dim",
+            }
+        )
+    return _RICH_THEME
+
+
+def _render_markdown(text: str, width: int = 0) -> StyleAndTextTuples:
+    """Render markdown text to prompt_toolkit styled tuples via Rich.
+
+    Falls back to plain unstyled text if Rich is not installed.
+    """
+    if not _RICH_AVAILABLE:
+        return [("", text + "\n")]
+    if width <= 0:
+        width = 80
+    console = _RichConsole(
+        file=StringIO(),
+        force_terminal=True,
+        width=width,
+        theme=_get_rich_theme(),
+        highlight=False,
+    )
+    console.print(_RichMarkdown(text), soft_wrap=True)
+    ansi_text = console.file.getvalue()
+    return list(to_formatted_text(ANSI(ansi_text)))
+
+
+# ---------------------------------------------------------------------------
+# Event type grouping — insert blank line between different event categories
+# ---------------------------------------------------------------------------
+
+_GROUP_MAP: dict[str, str] = {
+    "task.started": "lifecycle",
+    "task.completed": "lifecycle",
+    "task.failed": "lifecycle",
+    "task.cancelled": "lifecycle",
+    "task.interrupted": "lifecycle",
+    "task.resumed": "lifecycle",
+    "task.progress": "progress",
+    "stream.flush": "llm",
+    "tool.invoke": "tool",
+    "tool.result": "tool",
+    "log": "log",
+    "system.log": "log",
+    "task.command_result": "command",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +216,8 @@ class TUISession:
         self._heartbeat: asyncio.Task | None = None
         self._system_stream: asyncio.Task | None = None
         self._task_window: Window | None = None
+        self._spinner_frame: int = 0
+        self._spinner_timer: asyncio.TimerHandle | None = None
 
         # Create the system tab buffer — always present at logical slot 0
         self.buffers[_SYSTEM_TAB_ID] = EventBuffer(
@@ -293,16 +386,11 @@ class TUISession:
 
     def _system_message(self, msg: str) -> None:
         """Append a message to the system tab's event buffer."""
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._append_line(_SYSTEM_TAB_ID, [(_S_TS, f"[{ts}] ")], [(_S_SYSTEM, msg)])
+        self._append_line(_SYSTEM_TAB_ID, [], [(_S_SYSTEM, msg)])
 
     def _system_messages(self, msgs: list[str]) -> None:
-        """Append multiple lines to the system tab, timestamping only the first."""
-        if not msgs:
-            return
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._append_line(_SYSTEM_TAB_ID, [(_S_TS, f"[{ts}] ")], [(_S_SYSTEM, msgs[0])])
-        for msg in msgs[1:]:
+        """Append multiple lines to the system tab."""
+        for msg in msgs:
             self._append_line(_SYSTEM_TAB_ID, [], [(_S_SYSTEM, msg)])
 
     def _refresh(self) -> None:
@@ -372,6 +460,7 @@ class TUISession:
                 if event.event_type == "stream.end":
                     if event.task_status:
                         buf.status = event.task_status
+                    self._ensure_spinner()
                     self._refresh()
                     await self._fetch_terminal_result(task_id, buf.status)
                     break
@@ -381,6 +470,7 @@ class TUISession:
                     buf.last_event_id = event.event_id
                 if event.task_status:
                     buf.status = event.task_status
+                    self._ensure_spinner()
 
                 # Delegate to the existing renderer via a thin adapter dict
                 self._render_event(
@@ -504,16 +594,63 @@ class TUISession:
                 pass
 
     def _render_event(self, task_id: str, ev: dict) -> None:
+        etype = ev.get("event_type", "")
+
+        # stream.chunk: accumulate into pending_text, don't commit a line
+        if etype == "stream.chunk":
+            buf = self.buffers.get(task_id)
+            if buf is not None:
+                buf.pending_text += ev.get("payload", {}).get("text", "")
+                if not buf.streaming:
+                    buf.streaming = True
+                    self._ensure_spinner()
+                self._refresh()
+            return
+
+        # stream.flush: clear pending and render final text as markdown
+        if etype == "stream.flush":
+            buf = self.buffers.get(task_id)
+            if buf is not None:
+                buf.pending_text = ""
+                buf.streaming = False
+                self._ensure_spinner()
+            # Visual grouping for stream.flush
+            if buf is not None and buf.lines:
+                group = _GROUP_MAP.get(etype, etype)
+                last_group = _GROUP_MAP.get(buf.last_event_type, buf.last_event_type)
+                if group != last_group and buf.last_event_type:
+                    self._append_line(task_id, [], [("", "")])
+            if buf is not None:
+                buf.last_event_type = etype
+            text = ev.get("payload", {}).get("text", "")
+            if text.strip():
+                styled_tuples = _render_markdown(text, self._pane_width())
+                current_line: StyleAndTextTuples = []
+                for style, content in styled_tuples:
+                    parts = content.split("\n")
+                    for i, part in enumerate(parts):
+                        if i > 0:
+                            self._append_line(task_id, [], current_line if current_line else [("", "")])
+                            current_line = []
+                        if part:
+                            current_line.append((style, part))
+                if current_line:
+                    self._append_line(task_id, [], current_line)
+            return
+
+        # Event type grouping — insert blank line between different event categories
+        buf = self.buffers.get(task_id)
+        if buf is not None and buf.lines:
+            group = _GROUP_MAP.get(etype, etype)
+            last_group = _GROUP_MAP.get(buf.last_event_type, buf.last_event_type)
+            if group != last_group and buf.last_event_type:
+                self._append_line(task_id, [], [("", "")])
+        if buf is not None:
+            buf.last_event_type = etype
+
         for line in fmt.render_event(ev):
             styled = [(_STYLE_MAP.get(s, _S_DIM), t) for s, t in line.segments]
-            # Split timestamp prefix from content
-            if styled and styled[0][0] == _S_TS:
-                prefix = [styled[0]]
-                content = styled[1:]
-            else:
-                prefix = []
-                content = styled
-            self._append_line(task_id, prefix, content)
+            self._append_line(task_id, [], styled)
 
     # ------------------------------------------------------------------
     # Input dispatch
@@ -950,6 +1087,7 @@ class TUISession:
 
     def get_tab_bar_text(self) -> StyleAndTextTuples:
         result: StyleAndTextTuples = []
+        spinner_char = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
 
         # System tab [0]
         is_sys_focused = self.focused_task_id == _SYSTEM_TAB_ID
@@ -969,7 +1107,12 @@ class TUISession:
             is_focused = tid == self.focused_task_id
             slot_style = "class:tab.focused" if is_focused else "class:tab.inactive"
             label = f"[{i}] {buf.agent_name}/{buf.task_name}" if buf.agent_name else f"[{i}] {buf.task_name}"
-            icon_style, icon_char = _STATUS.get(buf.status, ("class:status.pending", "○"))
+            # Show spinner for running/streaming tasks, static icon otherwise
+            if buf.status in ("running", "pending") or buf.streaming:
+                icon_style = "class:status.running"
+                icon_char = spinner_char
+            else:
+                icon_style, icon_char = _STATUS.get(buf.status, ("class:status.pending", "○"))
             result.extend(
                 [
                     (slot_style, f"  {label} "),
@@ -984,45 +1127,32 @@ class TUISession:
         if buf is None:
             return [(_S_DIM, "  No tab selected.\n")]
 
-        if buf.task_id == _SYSTEM_TAB_ID and not buf.lines:
+        if buf.task_id == _SYSTEM_TAB_ID and not buf.lines and not buf.pending_text:
             return [(_S_DIM, "  :help for commands\n")]
 
         result: StyleAndTextTuples = []
         for _prefix, content in buf.lines:
             result.extend(content)
             result.append(("", "\n"))
+
+        # Append pending streaming text rendered as markdown (cached)
+        if buf.pending_text:
+            if buf.pending_text != buf._cached_pending:
+                buf._cached_pending = buf.pending_text
+                buf._cached_pending_tuples = _render_markdown(buf.pending_text, self._pane_width())
+            result.extend(buf._cached_pending_tuples)
+
         return result
 
     def _get_event_line_prefix(self, line_number: int, wrap_count: int) -> StyleAndTextTuples:
-        """Return the timestamp prefix for a given line in the event pane.
+        """Return the left margin prefix for a given line in the event pane.
 
         Called by prompt_toolkit's ``get_line_prefix`` on each visible line.
         ``line_number`` is the zero-based index within the full content (maps
         directly to ``buf.lines``); ``wrap_count`` indicates the soft-wrap
         continuation index (0 for the first physical row of a logical line).
         """
-        buf = self._focused_buf()
-        if buf is None:
-            return [(_S_DIM, " " * _TS_COL_WIDTH)]
-
-        if line_number < 0 or line_number >= len(buf.lines):
-            return [(_S_DIM, " " * _TS_COL_WIDTH)]
-
-        prefix, _content = buf.lines[line_number]
-
-        if wrap_count > 0 or not prefix:
-            # Continuation wrap or no timestamp — emit blank padding
-            return [(_S_DIM, " " * _TS_COL_WIDTH)]
-
-        # Build the prefix text, right-padded to fixed width
-        prefix_text = "".join(t for _, t in prefix)
-        result: StyleAndTextTuples = []
-        for style, text in prefix:
-            result.append((style, text))
-        pad_len = _TS_COL_WIDTH - len(prefix_text)
-        if pad_len > 0:
-            result.append((_S_DIM, " " * pad_len))
-        return result
+        return [("", _LINE_PREFIX)]
 
     def get_status_bar_text(self) -> StyleAndTextTuples:
         buf = self._focused_buf()
@@ -1030,7 +1160,10 @@ class TUISession:
             left = " system  "
         elif buf:
             label = f"{buf.agent_name}/{buf.task_name}" if buf.agent_name else buf.task_name
-            left = f" {label} [{buf.status}] {buf.task_id}  "
+            status_text = buf.status
+            if buf.streaming:
+                status_text = f"{buf.status}/streaming"
+            left = f" {label} [{status_text}] {buf.task_id}  "
         else:
             left = " switchplane  "
         hints = "[Tab] switch  [PgUp/Dn] scroll  [Ctrl+X] cancel  [Ctrl+D] detach  [Ctrl+C] quit"
@@ -1052,8 +1185,64 @@ class TUISession:
         return [("class:prompt", f" {label} "), ("class:prompt.arrow", "> ")]
 
     # ------------------------------------------------------------------
+    # Spinner / progress indicator
+    # ------------------------------------------------------------------
+
+    def _has_active_tasks(self) -> bool:
+        """Check whether any task buffer is in a non-terminal active state."""
+        for tid, buf in self.buffers.items():
+            if tid == _SYSTEM_TAB_ID:
+                continue
+            if buf.status in ("running", "pending") or buf.streaming:
+                return True
+        return False
+
+    def _start_spinner(self) -> None:
+        """Start the spinner animation timer if not already running."""
+        if self._spinner_timer is not None:
+            return
+        if self._app is None:
+            return
+        self._tick_spinner()
+
+    def _stop_spinner(self) -> None:
+        """Stop the spinner animation timer."""
+        if self._spinner_timer is not None:
+            self._spinner_timer.cancel()
+            self._spinner_timer = None
+
+    def _tick_spinner(self) -> None:
+        """Advance the spinner frame and schedule the next tick."""
+        self._spinner_frame += 1
+        self._refresh()
+        if self._app is not None and self._has_active_tasks():
+            loop = self._app.loop
+            if loop is not None:
+                self._spinner_timer = loop.call_later(0.2, self._tick_spinner)
+            else:
+                self._spinner_timer = None
+        else:
+            self._spinner_timer = None
+
+    def _ensure_spinner(self) -> None:
+        """Start or stop the spinner based on whether active tasks exist."""
+        if self._has_active_tasks():
+            self._start_spinner()
+        else:
+            self._stop_spinner()
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _pane_width(self) -> int:
+        """Return the usable width of the event pane (columns minus line prefix)."""
+        if self._app is not None:
+            try:
+                return max(40, self._app.output.get_size().columns - _LINE_PREFIX_WIDTH)
+            except Exception:
+                pass
+        return 80
 
     def _focused_buf(self) -> EventBuffer | None:
         if self.focused_task_id and self.focused_task_id in self.buffers:
@@ -1265,6 +1454,8 @@ def build_tui_app(session: TUISession) -> Application:
             "event.log": "#55aacc",
             "event.system": "italic #8888cc",
             "event.result": "#00ff88",
+            "event.stream": "italic #888899",
+            "event.tool": "#555577",
             "event.dim": "#444466",
             # Input bar
             "prompt": "bold #aaaaff",

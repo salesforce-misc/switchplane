@@ -188,6 +188,28 @@ class AgentContext:
         )
         _write_message_sync(self._sock, event.model_dump_json().encode())
 
+    def stream_token(self, text: str) -> None:
+        """Emit a streaming text chunk (ephemeral, not persisted)."""
+        self.emit("stream.chunk", {"text": text})
+
+    def stream_flush(self, text: str) -> None:
+        """End a streaming sequence. The text is the final complete output that replaces accumulated chunks."""
+        self.emit("stream.flush", {"text": text})
+
+    def tool_invoke(self, name: str, summary: str = "") -> None:
+        """Emit a tool invocation event."""
+        payload: dict[str, Any] = {"name": name}
+        if summary:
+            payload["summary"] = summary
+        self.emit("tool.invoke", payload)
+
+    def tool_result(self, name: str, summary: str = "") -> None:
+        """Emit a tool result event."""
+        payload: dict[str, Any] = {"name": name}
+        if summary:
+            payload["summary"] = summary
+        self.emit("tool.result", payload)
+
     def progress(self, message: str, detail: str | list[str] | None = None, **extra) -> None:
         payload: dict[str, Any] = {"message": message, **extra}
         if detail is not None:

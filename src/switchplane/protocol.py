@@ -59,6 +59,10 @@ class AgentEvent(BaseModel):
         "checkpoint.save",
         "log",
         "task.command_result",
+        "stream.chunk",
+        "stream.flush",
+        "tool.invoke",
+        "tool.result",
     ]
     task_id: str
     payload: dict[str, Any] = Field(default_factory=dict)

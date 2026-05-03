@@ -154,7 +154,7 @@ class TestPrintEvent:
         out = capsys.readouterr().out
         assert "custom.event" in out
 
-    def test_timestamp_formatting(self, capsys):
+    def test_no_timestamp_in_output(self, capsys):
         _print_event(
             {
                 "timestamp": "2024-01-15T14:30:45.123Z",
@@ -163,7 +163,9 @@ class TestPrintEvent:
             }
         )
         out = capsys.readouterr().out
-        assert "14:30:45" in out
+        # Timestamps are no longer rendered
+        assert "14:30:45" not in out
+        assert "Task started" in out
 
 
 class TestBuildCli:

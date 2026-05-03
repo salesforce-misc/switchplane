@@ -85,6 +85,10 @@ class TestAgentEvent:
             "checkpoint.save",
             "log",
             "task.command_result",
+            "stream.chunk",
+            "stream.flush",
+            "tool.invoke",
+            "tool.result",
         ]
         for t in valid_types:
             ev = AgentEvent(type=t, task_id="t1")
