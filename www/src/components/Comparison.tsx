@@ -217,7 +217,7 @@ function LlmAsRuntime({ active }: { active: boolean }) {
 
   return (
     <div className="relative">
-      <svg viewBox="0 0 300 400" className="h-auto w-full">
+      <svg aria-hidden="true" viewBox="0 0 300 400" className="h-auto w-full">
         <defs>
           <marker id="arrowGray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
             <path d="M0,0 L8,3 L0,6" fill="#475569" />
@@ -339,7 +339,7 @@ function RuntimeUsingLlm({ active }: { active: boolean }) {
 
   return (
     <div className="relative">
-      <svg viewBox="0 0 320 380" className="h-auto w-full">
+      <svg aria-hidden="true" viewBox="0 0 320 380" className="h-auto w-full">
         <defs>
           <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
             <path d="M0,0 L8,3 L0,6" fill="#06b6d4" />

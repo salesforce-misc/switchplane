@@ -12,7 +12,7 @@ const pillars: Pillar[] = [
     description:
       "The graph structure is fixed: what runs, when, and in what order is defined at build time. Within that topology, individual nodes can be as non-deterministic as you need. A node might be a simple function, a full LLM reasoning loop, or a multi-model pipeline. You control where non-determinism lives.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <path d="M4 4h6v6H4zM14 4h6v6h-6zM9 14h6v6H9z" stroke="currentColor" strokeWidth="1.5" rx="1" />
         <path d="M7 10v1.5a2 2 0 002 2h0M17 10v1.5a2 2 0 01-2 2h0" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
@@ -23,7 +23,7 @@ const pillars: Pillar[] = [
     description:
       "Reserve expensive model calls for decisions requiring judgment. Deterministic tasks execute as code: microsecond performance, zero marginal cost, no token budget wasted on work a for-loop can do.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <path d="M12 2v4m0 12v4M2 12h4m12 0h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         <circle cx="12" cy="12" r="6" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="12" cy="12" r="2" fill="currentColor" />
@@ -35,7 +35,7 @@ const pillars: Pillar[] = [
     description:
       "Agent workflows are observable and testable like standard software. Visible logs, unit-testable nodes, clear failure points. No opaque prompt-based black boxes you can only evaluate by running end-to-end.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="1.5" />
         <path d="M8 12l2.5 2.5L16 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -46,7 +46,7 @@ const pillars: Pillar[] = [
     description:
       "Swap between commercial APIs, open-source models, and local execution without rewriting pipeline logic. Different nodes can use different models. Model routing is configuration, not architecture. No provider lock-in baked into your workflow definitions.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <rect x="2" y="4" width="8" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />
         <rect x="14" y="4" width="8" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />
         <rect x="8" y="14" width="8" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />

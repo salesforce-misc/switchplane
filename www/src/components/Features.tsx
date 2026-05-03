@@ -12,7 +12,7 @@ const features: Feature[] = [
     description:
       "Tasks can spawn child tasks, wait for completion, and send notifications to sibling tasks. Build multi-agent workflows where tasks collaborate through a structured messaging system.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <circle cx="6" cy="6" r="3" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="18" cy="6" r="3" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="12" cy="18" r="3" stroke="currentColor" strokeWidth="1.5" />
@@ -25,7 +25,7 @@ const features: Feature[] = [
     description:
       "Every app is a standalone CLI with streaming event output. A full-screen terminal UI with tab-based task navigation launches automatically for interactive sessions.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" strokeWidth="1.5" />
         <path d="M6 9l3 3-3 3M12 15h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -36,7 +36,7 @@ const features: Feature[] = [
     description:
       "User code never runs in the control plane. Each agent is a separate process communicating over Unix socketpairs. Crash one agent, the rest keep running.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
         <rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
         <rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
@@ -49,7 +49,7 @@ const features: Feature[] = [
     description:
       "LangGraph-native checkpointing backed by SQLite. Interrupt any task and resume from exactly where it left off. State is saved after each graph node.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <path d="M12 2v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         <path d="M12 8l4 4-4 4-4-4z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
         <path d="M12 16v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -62,7 +62,7 @@ const features: Feature[] = [
     description:
       "Tasks are defined as LangGraph StateGraph graphs. No proprietary workflow abstraction. Use the full power of LangGraph's nodes, edges, and conditional branching.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <circle cx="5" cy="12" r="2.5" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="19" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="19" cy="18" r="2.5" stroke="currentColor" strokeWidth="1.5" />
@@ -75,7 +75,7 @@ const features: Feature[] = [
     description:
       "Connect to Model Context Protocol servers for tool access. Declare which servers each task needs. Supports both stdio and HTTP transports.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <path d="M8 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         <rect x="2" y="8" width="6" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />
         <rect x="16" y="8" width="6" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -88,7 +88,7 @@ const features: Feature[] = [
     description:
       "Each task operates with its own scoped context. No implicit shared state, no bleeding conversation history between agents. Communication is structured, typed message-passing. You can test each task in complete isolation because it genuinely is isolated.",
     icon: (
-      <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6">
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="h-6 w-6">
         <rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="1.5" strokeDasharray="4 2" />
         <rect x="7" y="7" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="12" cy="12" r="2" fill="currentColor" />
