@@ -17,7 +17,7 @@ function LocalFirst() {
         <div className="grid gap-8 sm:grid-cols-2">
           <div>
             <p className="leading-relaxed text-gray-400">
-              Every other agent framework in 2026 ships you toward a cloud deployment target.
+              Most agent frameworks push you toward cloud infrastructure before you've written your first task.
               Switchplane runs as a local daemon on your machine. Unix sockets for IPC. SQLite
               for persistence. No external dependencies, no API gateway, no deployment pipeline
               to get started.
