@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -372,3 +373,87 @@ class TestListAgents:
         assert agents[0]["name"] == "greeter"
         assert "greet" in agents[0]["tasks"]
         assert "parameters" in agents[0]["tasks"]["greet"]
+
+
+class TestConfigReload:
+    @pytest.mark.asyncio
+    async def test_config_mtime_none_path(self, cp):
+        assert cp._config_mtime(None) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_config_mtime_missing_file(self, cp):
+        from pathlib import Path
+
+        assert cp._config_mtime(Path("/nonexistent/config.toml")) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_config_mtime_existing_file(self, cp):
+        path = cp.paths.config_path
+        path.write_text('[logging]\nlevel = "info"\n')
+        mtime = cp._config_mtime(path)
+        assert isinstance(mtime, float)
+        assert mtime > 0.0
+
+    @pytest.mark.asyncio
+    async def test_reload_config_updates_config(self, cp):
+        cp.paths.config_path.write_text('[logging]\nlevel = "warning"\n')
+        cp._reload_config()
+        assert cp.config.logging.level == "warning"
+
+    @pytest.mark.asyncio
+    async def test_reload_config_picks_up_new_content(self, cp):
+        cp.paths.config_path.write_text('[logging]\nlevel = "error"\n')
+        cp._reload_config()
+        assert cp.config.logging.level == "error"
+
+        cp.paths.config_path.write_text('[logging]\nlevel = "info"\n')
+        cp._reload_config()
+        assert cp.config.logging.level == "info"
+
+    @pytest.mark.asyncio
+    async def test_watch_task_running_after_start(self, cp):
+        assert cp._config_watch_task is not None
+        assert not cp._config_watch_task.done()
+
+    @pytest.mark.asyncio
+    async def test_watch_broadcasts_on_change(self, cp):
+        from unittest.mock import patch
+
+        cp._config_watch_task.cancel()
+        try:
+            await cp._config_watch_task
+        except asyncio.CancelledError:
+            pass
+
+        cp.paths.config_path.write_text('[logging]\nlevel = "info"\n')
+
+        broadcast_calls = []
+        original_broadcast = cp._broadcast_system_event
+
+        def capture_broadcast(event_type, payload):
+            broadcast_calls.append((event_type, payload))
+            original_broadcast(event_type, payload)
+
+        cp._broadcast_system_event = capture_broadcast
+
+        _real_sleep = asyncio.sleep
+
+        async def instant_sleep(seconds):
+            await _real_sleep(0)
+
+        with patch("asyncio.sleep", side_effect=instant_sleep):
+            cp._config_watch_task = asyncio.create_task(cp._watch_config())
+            await _real_sleep(0.01)
+
+            cp.paths.config_path.write_text('[logging]\nlevel = "warning"\n')
+            await _real_sleep(0.01)
+
+            cp._config_watch_task.cancel()
+            try:
+                await cp._config_watch_task
+            except asyncio.CancelledError:
+                pass
+
+        reloaded = [c for c in broadcast_calls if c[0] == "config.reloaded"]
+        assert len(reloaded) >= 1
+        assert cp.config.logging.level == "warning"
