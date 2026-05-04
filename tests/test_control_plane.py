@@ -389,24 +389,24 @@ class TestConfigReload:
     @pytest.mark.asyncio
     async def test_config_mtime_existing_file(self, cp):
         path = cp.paths.config_path
-        path.write_text("[logging]\nlevel = \"info\"\n")
+        path.write_text('[logging]\nlevel = "info"\n')
         mtime = cp._config_mtime(path)
         assert isinstance(mtime, float)
         assert mtime > 0.0
 
     @pytest.mark.asyncio
     async def test_reload_config_updates_config(self, cp):
-        cp.paths.config_path.write_text("[logging]\nlevel = \"warning\"\n")
+        cp.paths.config_path.write_text('[logging]\nlevel = "warning"\n')
         cp._reload_config()
         assert cp.config.logging.level == "warning"
 
     @pytest.mark.asyncio
     async def test_reload_config_picks_up_new_content(self, cp):
-        cp.paths.config_path.write_text("[logging]\nlevel = \"error\"\n")
+        cp.paths.config_path.write_text('[logging]\nlevel = "error"\n')
         cp._reload_config()
         assert cp.config.logging.level == "error"
 
-        cp.paths.config_path.write_text("[logging]\nlevel = \"info\"\n")
+        cp.paths.config_path.write_text('[logging]\nlevel = "info"\n')
         cp._reload_config()
         assert cp.config.logging.level == "info"
 
@@ -425,7 +425,7 @@ class TestConfigReload:
         except asyncio.CancelledError:
             pass
 
-        cp.paths.config_path.write_text("[logging]\nlevel = \"info\"\n")
+        cp.paths.config_path.write_text('[logging]\nlevel = "info"\n')
 
         broadcast_calls = []
         original_broadcast = cp._broadcast_system_event
@@ -445,7 +445,7 @@ class TestConfigReload:
             cp._config_watch_task = asyncio.create_task(cp._watch_config())
             await _real_sleep(0.01)
 
-            cp.paths.config_path.write_text("[logging]\nlevel = \"warning\"\n")
+            cp.paths.config_path.write_text('[logging]\nlevel = "warning"\n')
             await _real_sleep(0.01)
 
             cp._config_watch_task.cancel()
