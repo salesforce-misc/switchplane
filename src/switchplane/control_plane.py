@@ -7,6 +7,7 @@ import json
 import logging as _logging
 import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import get_type_hints
 from uuid import uuid4
 
@@ -64,6 +65,7 @@ class ControlPlane:
         self.config: AppConfig | None = None
         self._idle_timer: IdleTimer | None = None
         self._shutdown_event = asyncio.Event()
+        self._config_watch_task: asyncio.Task | None = None
         # task_id -> set of asyncio.Queue[StreamEvent | None]
         # None in the queue is the terminal sentinel (stream.end)
         self._stream_subscribers: dict[str, set[asyncio.Queue]] = {}
@@ -121,6 +123,9 @@ class ControlPlane:
         self._idle_timer = IdleTimer(IDLE_TIMEOUT, self._on_idle)
         self._idle_timer.reset()
 
+        # Start config file watcher
+        self._config_watch_task = asyncio.create_task(self._watch_config())
+
     async def run(self) -> None:
         """Run until shutdown."""
         await self.start()
@@ -139,6 +144,13 @@ class ControlPlane:
 
         if self._idle_timer:
             self._idle_timer.cancel()
+
+        if self._config_watch_task:
+            self._config_watch_task.cancel()
+            try:
+                await self._config_watch_task
+            except asyncio.CancelledError:
+                pass
 
         # Kill all agent processes
         if self.subprocess_mgr:
@@ -454,6 +466,40 @@ class ControlPlane:
         except Exception as e:
             logger.error("request_error", method=request.method, error=str(e), exc_info=True)
             return CliResponse(id=request.id, ok=False, error=str(e))
+
+    def _reload_config(self) -> None:
+        self.config = load_config(self.paths.config_path, self.app.default_config_path, self.app.config_class)
+        level = getattr(_logging, self.config.logging.level.upper(), _logging.DEBUG)
+        _logging.getLogger().setLevel(level)
+        logger.info("config_reloaded", path=str(self.paths.config_path))
+
+    def _config_mtime(self, path: Path | None) -> float:
+        if path is None:
+            return 0.0
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    async def _watch_config(self) -> None:
+        user_mtime = self._config_mtime(self.paths.config_path)
+        default_mtime = self._config_mtime(self.app.default_config_path)
+
+        while True:
+            await asyncio.sleep(2)
+            try:
+                new_user_mtime = self._config_mtime(self.paths.config_path)
+                new_default_mtime = self._config_mtime(self.app.default_config_path)
+
+                if new_user_mtime != user_mtime or new_default_mtime != default_mtime:
+                    self._reload_config()
+                    self._broadcast_system_event("config.reloaded", {"path": str(self.paths.config_path)})
+                    user_mtime = new_user_mtime
+                    default_mtime = new_default_mtime
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("config_watch_error")
 
     async def _submit_task(self, request: CliRequest) -> CliResponse:
         """Submit a new task for execution."""
