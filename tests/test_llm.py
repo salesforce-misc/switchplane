@@ -1,16 +1,21 @@
 """Tests for switchplane.llm — model registry and build_llm factory."""
 
+import asyncio
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from switchplane.llm import (
+    _MAX_REPEAT_CALLS,
+    _MAX_TOOL_RESULT_CHARS,
     DEFAULT_MODEL,
     MODELS,
     ModelInfo,
     build_llm,
     context_window,
+    extract_response_text,
+    run_tool_loop,
 )
 
 # ---------------------------------------------------------------------------
@@ -292,3 +297,376 @@ class TestBuildLlmUnknownPrefix:
     def test_empty_string_raises(self):
         with pytest.raises(ValueError, match="Unknown model prefix"):
             build_llm("")
+
+
+# ---------------------------------------------------------------------------
+# extract_response_text
+# ---------------------------------------------------------------------------
+
+
+class TestExtractResponseText:
+    def test_list_single_text_block(self):
+        content = [{"type": "text", "text": "hello"}]
+        assert extract_response_text(content) == "hello"
+
+    def test_list_multiple_text_blocks_joined_with_newline(self):
+        content = [
+            {"type": "text", "text": "line1"},
+            {"type": "text", "text": "line2"},
+        ]
+        assert extract_response_text(content) == "line1\nline2"
+
+    def test_list_mixed_block_types_only_text_extracted(self):
+        content = [
+            {"type": "text", "text": "answer"},
+            {"type": "tool_use", "name": "search", "input": {}},
+            {"type": "text", "text": "more"},
+        ]
+        assert extract_response_text(content) == "answer\nmore"
+
+    def test_empty_list_returns_empty_string(self):
+        assert extract_response_text([]) == ""
+
+    def test_serialized_string_parsed_successfully(self):
+        content = "[{'type': 'text', 'text': 'hello'}]"
+        assert extract_response_text(content) == "hello"
+
+    def test_serialized_string_parse_failure_returns_as_is(self):
+        content = "[{broken"
+        assert extract_response_text(content) == "[{broken"
+
+    def test_plain_string_returned_as_is(self):
+        assert extract_response_text("just a string") == "just a string"
+
+    def test_empty_string_returned_as_is(self):
+        assert extract_response_text("") == ""
+
+    def test_list_with_text_block_missing_text_key(self):
+        # A text-type block without a 'text' key should produce empty string for that block
+        content = [{"type": "text"}, {"type": "text", "text": "ok"}]
+        assert extract_response_text(content) == "\nok"
+
+    def test_list_with_non_dict_items_ignored(self):
+        # Non-dict items in the list are skipped by the isinstance check
+        content = [{"type": "text", "text": "yes"}, "stray string", 42]
+        assert extract_response_text(content) == "yes"
+
+
+# ---------------------------------------------------------------------------
+# run_tool_loop — helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_response(content="done", tool_calls=None):
+    """Create a mock LLM response with .content and .tool_calls."""
+    resp = MagicMock()
+    resp.content = content
+    resp.tool_calls = tool_calls or []
+    return resp
+
+
+def _make_ctx(task_id="task-123"):
+    """Create a mock AgentContext with the methods run_tool_loop uses."""
+    ctx = MagicMock()
+    ctx.task_id = task_id
+    ctx.stream_flush = MagicMock()
+    ctx.progress = MagicMock()
+    ctx.tool_invoke = MagicMock()
+    return ctx
+
+
+def _make_tool(name: str, result: str = "tool result"):
+    """Create a mock tool with an async ainvoke."""
+    tool = MagicMock()
+    tool.ainvoke = AsyncMock(return_value=result)
+    return tool
+
+
+# ---------------------------------------------------------------------------
+# run_tool_loop
+# ---------------------------------------------------------------------------
+
+
+class TestRunToolLoop:
+    """Tests for the async tool-calling loop."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_trim_messages(self):
+        """Patch trim_messages to be a no-op (returns a copy of messages)."""
+        with patch(
+            "langchain_core.messages.utils.trim_messages",
+            side_effect=lambda msgs, **kwargs: list(msgs),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_immediate_answer_no_tool_calls(self):
+        """LLM responds without tool_calls — returns immediately."""
+        response = _make_response(content="final answer")
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=response)
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "hi"}]
+
+        result = await run_tool_loop(llm, messages, {}, ctx, "claude-sonnet-4-20250514")
+
+        assert result is response
+        ctx.stream_flush.assert_called_once_with("final answer")
+
+    @pytest.mark.asyncio
+    async def test_single_tool_call_then_answer(self):
+        """LLM calls a tool once, then produces final answer."""
+        tool_response = _make_response(
+            content="thinking",
+            tool_calls=[{"name": "search", "args": {"q": "test"}, "id": "tc1"}],
+        )
+        final_response = _make_response(content="the answer")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = _make_tool("search", result="search results")
+        tool_map = {"search": tool}
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "query"}]
+
+        result = await run_tool_loop(llm, messages, tool_map, ctx, "claude-sonnet-4-20250514")
+
+        assert result is final_response
+        tool.ainvoke.assert_called_once_with({"q": "test"})
+        ctx.tool_invoke.assert_called_once_with("search", "test")
+        # Tool message appended to messages
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["content"] == "search results"
+        assert tool_msgs[0]["tool_call_id"] == "tc1"
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_appends_error(self):
+        """Tool not in tool_map results in error message with correct tool_call_id."""
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "nonexistent", "args": {}, "id": "tc-bad"}],
+        )
+        final_response = _make_response(content="ok")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {}, ctx, "claude-sonnet-4-20250514")
+
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "unknown tool" in tool_msgs[0]["content"]
+        assert tool_msgs[0]["tool_call_id"] == "tc-bad"
+
+    @pytest.mark.asyncio
+    async def test_result_truncation_when_enabled(self):
+        """Long tool results are truncated when truncate_results=True."""
+        long_result = "x" * (_MAX_TOOL_RESULT_CHARS + 500)
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "big", "args": {}, "id": "tc2"}],
+        )
+        final_response = _make_response(content="done")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = _make_tool("big", result=long_result)
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"big": tool}, ctx, "claude-sonnet-4-20250514", truncate_results=True)
+
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        content = tool_msgs[0]["content"]
+        assert len(content) < len(long_result)
+        assert "truncated" in content
+        assert str(len(long_result)) in content
+
+    @pytest.mark.asyncio
+    async def test_no_truncation_when_disabled(self):
+        """Long tool results are preserved when truncate_results=False."""
+        long_result = "y" * (_MAX_TOOL_RESULT_CHARS + 1000)
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "big", "args": {}, "id": "tc3"}],
+        )
+        final_response = _make_response(content="done")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = _make_tool("big", result=long_result)
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"big": tool}, ctx, "claude-sonnet-4-20250514", truncate_results=False)
+
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert tool_msgs[0]["content"] == long_result
+
+    @pytest.mark.asyncio
+    async def test_repeat_detection_stops_after_max_repeats(self):
+        """Same tool calls repeated _MAX_REPEAT_CALLS times triggers early exit."""
+        # Need _MAX_REPEAT_CALLS responses with identical tool calls.
+        # First sets sig with repeat_count=1, subsequent increments.
+        # Exits when repeat_count >= _MAX_REPEAT_CALLS (3rd iteration).
+        responses = []
+        for i in range(_MAX_REPEAT_CALLS + 1):
+            responses.append(
+                _make_response(content="", tool_calls=[{"name": "fetch", "args": {"url": "http://x"}, "id": f"tc-{i}"}])
+            )
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=responses)
+
+        tool = _make_tool("fetch", result="same")
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"fetch": tool}, ctx, "claude-sonnet-4-20250514")
+
+        ctx.progress.assert_any_call("Working: detected repeated tool calls, stopping.")
+        assert llm.ainvoke.call_count == _MAX_REPEAT_CALLS
+
+    @pytest.mark.asyncio
+    async def test_timeout_retry(self):
+        """Tool raises TimeoutError, retried up to max_retries."""
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "slow", "args": {}, "id": "tc-to"}],
+        )
+        final_response = _make_response(content="done")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = MagicMock()
+        # First call times out, second succeeds
+        tool.ainvoke = AsyncMock(side_effect=[TimeoutError("timed out"), "ok result"])
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"slow": tool}, ctx, "claude-sonnet-4-20250514", max_retries=2)
+
+        assert tool.ainvoke.call_count == 2
+        ctx.progress.assert_any_call("Tool call timed out, retrying (2/2)...")
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert tool_msgs[0]["content"] == "ok result"
+
+    @pytest.mark.asyncio
+    async def test_timeout_exhausted(self):
+        """All retries exhausted on TimeoutError produces error message."""
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "slow", "args": {}, "id": "tc-to2"}],
+        )
+        final_response = _make_response(content="done")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = MagicMock()
+        tool.ainvoke = AsyncMock(side_effect=TimeoutError("timed out"))
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"slow": tool}, ctx, "claude-sonnet-4-20250514", max_retries=2)
+
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert "timed out after 2 attempts" in tool_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_tool_generic_exception_captured(self):
+        """Tool raises a generic Exception, error string is captured."""
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "broken", "args": {}, "id": "tc-err"}],
+        )
+        final_response = _make_response(content="done")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
+
+        tool = MagicMock()
+        tool.ainvoke = AsyncMock(side_effect=RuntimeError("something broke"))
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(llm, messages, {"broken": tool}, ctx, "claude-sonnet-4-20250514")
+
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        assert tool_msgs[0]["content"] == "Error: something broke"
+
+    @pytest.mark.asyncio
+    async def test_progress_every_n_turns(self):
+        """progress_every=2 emits progress on turn 2."""
+        # We need 2 tool-call turns then a final answer (3 ainvoke calls total)
+        tc1 = _make_response(
+            content="",
+            tool_calls=[{"name": "a", "args": {"x": "1"}, "id": "t1"}],
+        )
+        tc2 = _make_response(
+            content="",
+            tool_calls=[{"name": "b", "args": {"y": "2"}, "id": "t2"}],
+        )
+        final = _make_response(content="result")
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=[tc1, tc2, final])
+
+        tool_a = _make_tool("a", "r1")
+        tool_b = _make_tool("b", "r2")
+        ctx = _make_ctx(task_id="task-456")
+        messages = [{"role": "human", "content": "q"}]
+
+        await run_tool_loop(
+            llm,
+            messages,
+            {"a": tool_a, "b": tool_b},
+            ctx,
+            "claude-sonnet-4-20250514",
+            progress_every=2,
+        )
+
+        # Turn 1: no progress. Turn 2: progress emitted.
+        progress_calls = [call.args[0] for call in ctx.progress.call_args_list]
+        assert any("2 turns" in msg for msg in progress_calls)
+        assert any("task cancel task-456" in msg for msg in progress_calls)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError from tool is NOT caught — it propagates."""
+        tool_response = _make_response(
+            content="",
+            tool_calls=[{"name": "cancel_me", "args": {}, "id": "tc-c"}],
+        )
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=tool_response)
+
+        tool = MagicMock()
+        tool.ainvoke = AsyncMock(side_effect=asyncio.CancelledError())
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "q"}]
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_tool_loop(llm, messages, {"cancel_me": tool}, ctx, "claude-sonnet-4-20250514")
+
+    @pytest.mark.asyncio
+    async def test_no_stream_flush_on_empty_content(self):
+        """stream_flush is not called when response content is empty/whitespace."""
+        response = _make_response(content="   ")
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=response)
+        ctx = _make_ctx()
+        messages = [{"role": "human", "content": "hi"}]
+
+        await run_tool_loop(llm, messages, {}, ctx, "claude-sonnet-4-20250514")
+
+        ctx.stream_flush.assert_not_called()
