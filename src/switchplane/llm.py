@@ -10,7 +10,22 @@ Requires one or more optional LangChain adapter packages:
   - langchain-openai (OpenAI models)
 """
 
-from typing import NamedTuple
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from switchplane.agent_runtime import AgentContext
+
+__all__ = [
+    "MODELS",
+    "ModelInfo",
+    "build_llm",
+    "context_window",
+    "extract_response_text",
+    "run_tool_loop",
+]
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -94,3 +109,157 @@ def build_llm(
         return ChatOpenAI(**kwargs)
     else:
         raise ValueError(f"Unknown model prefix: {model}. Expected claude-*, gemini-*, or gpt-*")
+
+
+# ---------------------------------------------------------------------------
+# Tool-loop utilities
+# ---------------------------------------------------------------------------
+
+_MAX_TOOL_RESULT_CHARS = 8_000
+_MAX_REPEAT_CALLS = 3
+
+
+def extract_response_text(content) -> str:
+    """Extract concatenated text blocks from an LLM response content field.
+
+    Handles three forms:
+      - A list of content blocks (standard structured response).
+      - A string that looks like a serialized list of dicts (checkpoint
+        deserialization artifact) — parsed via ast.literal_eval.
+      - A plain string (returned as-is).
+    """
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+        )
+    if isinstance(content, str) and content.startswith("[{"):
+        import ast
+
+        try:
+            parsed = ast.literal_eval(content)
+            if isinstance(parsed, list):
+                return "\n".join(
+                    block.get("text", "") for block in parsed if isinstance(block, dict) and block.get("type") == "text"
+                )
+        except (ValueError, SyntaxError):
+            pass
+    return content
+
+
+async def run_tool_loop(
+    llm_with_tools,
+    messages: list,
+    tool_map: dict,
+    ctx: AgentContext,
+    model_name: str,
+    *,
+    label: str = "Working",
+    max_retries: int = 1,
+    truncate_results: bool = True,
+    progress_every: int | None = None,
+):
+    """Drive an LLM tool-calling loop until the model produces a final answer.
+
+    Parameters
+    ----------
+    llm_with_tools:
+        A LangChain chat model already bound with tools.
+    messages:
+        The conversation message list (mutated in place).
+    tool_map:
+        Mapping of tool name -> langchain tool instance.
+    ctx:
+        Agent context providing stream_flush, progress, and tool_invoke.
+    model_name:
+        Model identifier used to determine context window for trimming.
+    label:
+        Human-readable label for progress messages.
+    max_retries:
+        Number of attempts per tool call on transient failures (timeout /
+        cancellation). Set to 1 for no retries.
+    truncate_results:
+        Whether to truncate long tool results to _MAX_TOOL_RESULT_CHARS.
+    progress_every:
+        If set, emit a progress message every N turns. None disables.
+    """
+    from langchain_core.messages.utils import trim_messages
+
+    turn = 0
+    last_sig: str | None = None
+    repeat_count = 0
+
+    while True:
+        trimmed = trim_messages(
+            messages,
+            max_tokens=context_window(model_name),
+            token_counter="approximate",
+            strategy="last",
+            include_system=True,
+            start_on="human",
+        )
+        messages.clear()
+        messages.extend(trimmed)
+
+        response = await llm_with_tools.ainvoke(messages)
+        messages.append(response)
+
+        if not response.tool_calls:
+            text = extract_response_text(response.content)
+            if text.strip():
+                ctx.stream_flush(text.strip())
+            return response
+
+        turn += 1
+
+        # Detect repeated identical tool-call sequences.
+        sig = json.dumps(
+            [(tc["name"], tc["args"]) for tc in response.tool_calls],
+            sort_keys=True,
+        )
+        if sig == last_sig:
+            repeat_count += 1
+            if repeat_count >= _MAX_REPEAT_CALLS:
+                ctx.progress(f"{label}: detected repeated tool calls, stopping.")
+                return response
+        else:
+            last_sig = sig
+            repeat_count = 1
+
+        if progress_every and turn % progress_every == 0:
+            msg = f"Still {label.lower()} ({turn} turns)..."
+            if hasattr(ctx, "task_id") and ctx.task_id:
+                msg += f" Cancel with: task cancel {ctx.task_id}"
+            ctx.progress(msg)
+
+        text = extract_response_text(response.content)
+        if text.strip():
+            ctx.stream_flush(text.strip())
+
+        for tc in response.tool_calls:
+            args_summary = " ".join((str(v).splitlines() or [""])[0][:80] for v in tc["args"].values())
+            ctx.tool_invoke(tc["name"], args_summary)
+
+            tool = tool_map.get(tc["name"])
+            if not tool:
+                messages.append(
+                    {"role": "tool", "content": f"Error: unknown tool '{tc['name']}'", "tool_call_id": tc["id"]}
+                )
+                continue
+
+            result: str | None = None
+            for attempt in range(max_retries):
+                try:
+                    result = str(await tool.ainvoke(tc["args"]))
+                    if truncate_results and len(result) > _MAX_TOOL_RESULT_CHARS:
+                        result = result[:_MAX_TOOL_RESULT_CHARS] + f"\n...[truncated, {len(result)} chars total]"
+                    break
+                except TimeoutError:
+                    if attempt < max_retries - 1:
+                        ctx.progress(f"Tool call timed out, retrying ({attempt + 2}/{max_retries})...")
+                    else:
+                        result = f"Error: tool call timed out after {max_retries} attempts"
+                except Exception as e:
+                    result = f"Error: {e}"
+                    break
+
+            messages.append({"role": "tool", "content": result, "tool_call_id": tc["id"]})
