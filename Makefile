@@ -1,7 +1,10 @@
-.PHONY: test test-cov install-test lint static format formatcheck clean
+.PHONY: test test-cov install-test install-e2e e2e lint static format formatcheck clean
 
 install-test:
 	uv pip install -e ".[test]"
+
+install-e2e:
+	uv pip install -e ".[test]" -e examples/hello
 
 install-examples:
 	uv pip install -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot
@@ -11,6 +14,9 @@ test:
 
 itest:
 	ITEST=1 uv run pytest -n auto tests/ -v
+
+e2e:
+	E2E=1 uv run pytest tests/e2e/ -v --timeout=30
 
 test-cov:
 	uv run pytest tests/ -v -n auto --cov=switchplane --cov-report=term-missing
