@@ -9,6 +9,17 @@ import pytest
 pytestmark = pytest.mark.skipif(os.environ.get("E2E") != "1", reason="Set E2E=1 to run e2e tests")
 
 
+def _wait_for_task(run_cli, task_id, timeout=10):
+    """Poll task show until status is completed."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = run_cli("task", "show", task_id)
+        if "completed" in result.stdout.lower():
+            return result
+        time.sleep(0.05)
+    pytest.fail(f"Task {task_id} did not complete within {timeout}s")
+
+
 class TestRunHello:
     """Tests that use a running daemon."""
 
@@ -32,13 +43,11 @@ class TestRunHello:
         assert match, f"Could not find task ID in output: {result.stdout}"
         task_id = match.group(1)
 
-        # Wait briefly for the task to complete (it's fast)
-        time.sleep(1)
+        _wait_for_task(run_cli, task_id)
 
         # Follow the task
         result = run_cli("task", "follow", task_id)
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        # The follow output should contain the greeting or the completed result
         assert "Hello, Bob" in result.stdout or "completed" in result.stdout.lower()
 
     def test_task_list(self, hello_daemon):
@@ -66,12 +75,7 @@ class TestRunHello:
         assert match, f"Could not find task ID in output: {result.stdout}"
         task_id = match.group(1)
 
-        # Wait for task to complete
-        time.sleep(1)
-
-        # Show task details
-        result = run_cli("task", "show", task_id)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
+        result = _wait_for_task(run_cli, task_id)
         assert "Task ID:" in result.stdout
         assert task_id in result.stdout
         assert "example" in result.stdout
