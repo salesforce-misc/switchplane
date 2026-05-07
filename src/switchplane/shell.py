@@ -402,12 +402,14 @@ class Shell:
                     old_content = ""
                 resolved.write_text(content)
                 if self._ctx is not None:
-                    diff = "".join(difflib.unified_diff(
-                        old_content.splitlines(keepends=True),
-                        content.splitlines(keepends=True),
-                        fromfile=str(resolved),
-                        tofile=str(resolved),
-                    ))
+                    diff = "".join(
+                        difflib.unified_diff(
+                            old_content.splitlines(keepends=True),
+                            content.splitlines(keepends=True),
+                            fromfile=str(resolved),
+                            tofile=str(resolved),
+                        )
+                    )
                     if diff:
                         self._ctx.file_edit(str(resolved), diff)
                 return f"Successfully wrote {len(content)} bytes to {resolved}"
@@ -445,12 +447,14 @@ class Shell:
                 new_content = content.replace(old_text, new_text, 1)
                 resolved.write_text(new_content)
                 if self._ctx is not None:
-                    diff = "".join(difflib.unified_diff(
-                        content.splitlines(keepends=True),
-                        new_content.splitlines(keepends=True),
-                        fromfile=str(resolved),
-                        tofile=str(resolved),
-                    ))
+                    diff = "".join(
+                        difflib.unified_diff(
+                            content.splitlines(keepends=True),
+                            new_content.splitlines(keepends=True),
+                            fromfile=str(resolved),
+                            tofile=str(resolved),
+                        )
+                    )
                     if diff:
                         self._ctx.file_edit(str(resolved), diff)
                 return f"Successfully edited {resolved}"

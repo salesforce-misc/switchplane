@@ -28,7 +28,8 @@ __all__ = [
     "run_tool_loop",
 ]
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -49,7 +50,7 @@ class Tool:
     instances, so callers must pass [t.tool for t in tools] to bind_tools.
     """
 
-    def __init__(self, tool: Any, render_fn: Callable[["AgentContext", str, dict], None] | None = None):
+    def __init__(self, tool: Any, render_fn: Callable[[AgentContext, str, dict], None] | None = None):
         self.tool = tool
         self.name = tool.name
         self.render_fn = render_fn
