@@ -63,6 +63,7 @@ class AgentEvent(BaseModel):
         "stream.flush",
         "tool.invoke",
         "tool.result",
+        "file.edit",
     ]
     task_id: str
     payload: dict[str, Any] = Field(default_factory=dict)

@@ -21,15 +21,42 @@ if TYPE_CHECKING:
 __all__ = [
     "MODELS",
     "ModelInfo",
+    "Tool",
     "build_llm",
     "context_window",
     "extract_response_text",
     "run_tool_loop",
 ]
 
+from collections.abc import Callable
+from typing import Any
+
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from switchplane.config import DEFAULT_MODEL
+
+
+class Tool:
+    """Wrapper associating a LangChain tool with an optional render function.
+
+    When used in a tool_map, the render_fn is called on each invocation to
+    emit progress info. If None, the invocation is silent (useful for tools
+    that emit their own events, e.g. file_edit).
+
+    Backwards-compatible: run_tool_loop also accepts bare StructuredTool
+    instances in the tool_map and falls back to default rendering.
+
+    Note: not a BaseTool subclass — LangChain's bind_tools requires BaseTool
+    instances, so callers must pass [t.tool for t in tools] to bind_tools.
+    """
+
+    def __init__(self, tool: Any, render_fn: Callable[[AgentContext, str, dict], None] | None = None):
+        self.tool = tool
+        self.name = tool.name
+        self.render_fn = render_fn
+
+    async def ainvoke(self, args: dict) -> Any:
+        return await self.tool.ainvoke(args)
 
 
 class ModelInfo(NamedTuple):
@@ -236,15 +263,21 @@ async def run_tool_loop(
             ctx.stream_flush(text.strip())
 
         for tc in response.tool_calls:
-            args_summary = " ".join((str(v).splitlines() or [""])[0][:80] for v in tc["args"].values())
-            ctx.tool_invoke(tc["name"], args_summary)
-
-            tool = tool_map.get(tc["name"])
-            if not tool:
+            entry = tool_map.get(tc["name"])
+            if not entry:
                 messages.append(
                     {"role": "tool", "content": f"Error: unknown tool '{tc['name']}'", "tool_call_id": tc["id"]}
                 )
                 continue
+
+            if isinstance(entry, Tool):
+                if entry.render_fn is not None:
+                    entry.render_fn(ctx, tc["name"], tc["args"])
+                tool = entry.tool
+            else:
+                args_summary = " ".join((str(v).splitlines() or [""])[0][:80] for v in tc["args"].values())
+                ctx.tool_invoke(tc["name"], args_summary)
+                tool = entry
 
             result: str | None = None
             for attempt in range(max_retries):

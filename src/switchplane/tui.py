@@ -176,6 +176,26 @@ def _render_markdown(text: str, width: int = 0) -> StyleAndTextTuples:
     return list(to_formatted_text(ANSI(ansi_text)))
 
 
+def _render_diff(diff_text: str, width: int = 0) -> StyleAndTextTuples:
+    """Render a unified diff to prompt_toolkit styled tuples via Rich.Syntax."""
+    if not _RICH_AVAILABLE:
+        return [("", diff_text + "\n")]
+    if width <= 0:
+        width = 80
+    from rich.syntax import Syntax as _RichSyntax
+
+    console = _RichConsole(
+        file=StringIO(),
+        force_terminal=True,
+        width=width,
+        theme=_get_rich_theme(),
+        highlight=False,
+    )
+    console.print(_RichSyntax(diff_text, "diff", theme="monokai", line_numbers=False, word_wrap=True))
+    ansi_text = console.file.getvalue()
+    return list(to_formatted_text(ANSI(ansi_text)))
+
+
 # ---------------------------------------------------------------------------
 # Event type grouping — insert blank line between different event categories
 # ---------------------------------------------------------------------------
@@ -191,6 +211,7 @@ _GROUP_MAP: dict[str, str] = {
     "stream.flush": "llm",
     "tool.invoke": "tool",
     "tool.result": "tool",
+    "file.edit": "tool",
     "log": "log",
     "system.log": "log",
     "task.command_result": "command",
@@ -625,6 +646,37 @@ class TUISession:
             text = ev.get("payload", {}).get("text", "")
             if text.strip():
                 styled_tuples = _render_markdown(text, self._pane_width())
+                current_line: StyleAndTextTuples = []
+                for style, content in styled_tuples:
+                    parts = content.split("\n")
+                    for i, part in enumerate(parts):
+                        if i > 0:
+                            self._append_line(task_id, [], current_line if current_line else [("", "")])
+                            current_line = []
+                        if part:
+                            current_line.append((style, part))
+                if current_line:
+                    self._append_line(task_id, [], current_line)
+            return
+
+        # file.edit: render diff via Rich.Syntax pipeline
+        if etype == "file.edit":
+            buf = self.buffers.get(task_id)
+            if buf is not None and buf.lines:
+                group = _GROUP_MAP.get(etype, etype)
+                last_group = _GROUP_MAP.get(buf.last_event_type, buf.last_event_type)
+                if group != last_group and buf.last_event_type:
+                    self._append_line(task_id, [], [("", "")])
+            if buf is not None:
+                buf.last_event_type = etype
+
+            path = ev.get("payload", {}).get("path", "")
+            diff = ev.get("payload", {}).get("diff", "")
+
+            self._append_line(task_id, [], [(_S_TOOL, f"✎ {path}")])
+
+            if diff.strip():
+                styled_tuples = _render_diff(diff, self._pane_width())
                 current_line: StyleAndTextTuples = []
                 for style, content in styled_tuples:
                     parts = content.split("\n")

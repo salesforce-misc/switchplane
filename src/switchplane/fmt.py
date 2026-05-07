@@ -116,6 +116,19 @@ def render_event(event: dict) -> list[EventLine]:
         main_line(INFO, parts[0])
         for cont in parts[1:]:
             continuation(INFO, cont)
+    elif etype == "file.edit":
+        path = payload.get("path", "")
+        diff = payload.get("diff", "")
+        main_line(TOOL, f"\u270e {path}")
+        for diff_line in diff.splitlines():
+            if diff_line.startswith("+"):
+                continuation(SUCCESS, diff_line)
+            elif diff_line.startswith("-"):
+                continuation(ERROR, diff_line)
+            elif diff_line.startswith("@@"):
+                continuation(DIM, diff_line)
+            else:
+                continuation(DIM, diff_line)
     else:
         msg = f"{etype}: {json.dumps(payload)}"
         parts = msg.split("\n")
