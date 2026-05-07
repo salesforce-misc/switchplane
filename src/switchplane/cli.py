@@ -615,6 +615,21 @@ def _print_event(event: dict) -> None:
                     click.echo(f"  {part}")
         return
 
+    if etype == "file.edit":
+        path = event.get("payload", {}).get("path", "")
+        diff = event.get("payload", {}).get("diff", "")
+        click.echo(f"  ✎ {path}")
+        if diff.strip():
+            try:
+                from rich.console import Console as RichConsole
+                from rich.syntax import Syntax
+
+                RichConsole().print(Syntax(diff, "diff", theme="monokai", line_numbers=False, word_wrap=True))
+            except ImportError:
+                for line in diff.splitlines():
+                    click.echo(f"    {line}")
+        return
+
     for line in fmt.render_event(event):
         text = "".join(seg[1] for seg in line.segments)
         is_dim = all(s in (fmt.DIM, fmt.TS) for s, _ in line.segments)

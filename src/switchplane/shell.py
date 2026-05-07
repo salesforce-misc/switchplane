@@ -1,13 +1,27 @@
 """Shell subprocess execution with guardrails."""
 
+from __future__ import annotations
+
 import asyncio
+import difflib
 import re
 import shlex
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
+if TYPE_CHECKING:
+    from switchplane.agent_runtime import AgentContext
+
+from switchplane.llm import Tool
+
 logger = structlog.get_logger()
+
+
+def _default_render(ctx: AgentContext, name: str, args: dict) -> None:
+    args_summary = " ".join((str(v).splitlines() or [""])[0] for v in args.values())
+    ctx.tool_invoke(name, args_summary)
 
 
 class Shell:
@@ -19,6 +33,7 @@ class Shell:
         allowed_commands: list[str],
         timeout: float = 30.0,
         max_output_chars: int = 30_000,
+        ctx: AgentContext | None = None,
     ):
         """Initialize Shell with security guardrails.
 
@@ -27,11 +42,13 @@ class Shell:
             allowed_commands: Binary names that can be executed (e.g., ["git", "gh", "rg"]).
             timeout: Default timeout in seconds for each invocation.
             max_output_chars: Maximum characters returned from bash_tool output.
+            ctx: Optional AgentContext for emitting file edit events.
         """
         self.allowed_paths = [p.resolve() for p in allowed_paths]
         self.allowed_commands = allowed_commands
         self.default_timeout = timeout
         self.max_output_chars = max_output_chars
+        self._ctx = ctx
 
     def validate_path(self, path: str) -> Path:
         """Validate a path is within allowed directories.
@@ -342,7 +359,13 @@ class Shell:
             args_schema=_grep_schema,
         )
 
-        return [list_directory, read_file, search_files, grep_files]
+        render = _default_render if self._ctx else None
+        return [
+            Tool(list_directory, render_fn=render),
+            Tool(read_file, render_fn=render),
+            Tool(search_files, render_fn=render),
+            Tool(grep_files, render_fn=render),
+        ]
 
     def write_tools(self) -> list:
         """Create file writing tools for LLM use.
@@ -372,9 +395,21 @@ class Shell:
         async def _write_invoke(file_path: str, content: str) -> str:
             try:
                 resolved = self.validate_path(file_path)
-                # Create parent directories if needed
                 resolved.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    old_content = resolved.read_text() if resolved.is_file() else ""
+                except (UnicodeDecodeError, ValueError):
+                    old_content = ""
                 resolved.write_text(content)
+                if self._ctx is not None:
+                    diff = "".join(difflib.unified_diff(
+                        old_content.splitlines(keepends=True),
+                        content.splitlines(keepends=True),
+                        fromfile=str(resolved),
+                        tofile=str(resolved),
+                    ))
+                    if diff:
+                        self._ctx.file_edit(str(resolved), diff)
                 return f"Successfully wrote {len(content)} bytes to {resolved}"
             except PermissionError as e:
                 return f"Error: {e}"
@@ -407,7 +442,17 @@ class Shell:
                     return "Error: old_text not found in file"
                 if count > 1:
                     return f"Error: old_text matches {count} locations; must be unique"
-                resolved.write_text(content.replace(old_text, new_text, 1))
+                new_content = content.replace(old_text, new_text, 1)
+                resolved.write_text(new_content)
+                if self._ctx is not None:
+                    diff = "".join(difflib.unified_diff(
+                        content.splitlines(keepends=True),
+                        new_content.splitlines(keepends=True),
+                        fromfile=str(resolved),
+                        tofile=str(resolved),
+                    ))
+                    if diff:
+                        self._ctx.file_edit(str(resolved), diff)
                 return f"Successfully edited {resolved}"
             except PermissionError as e:
                 return f"Error: {e}"
@@ -448,7 +493,12 @@ class Shell:
             args_schema=_mkdir_schema,
         )
 
-        return [write_file, edit_file, create_directory]
+        render = _default_render if self._ctx else None
+        return [
+            Tool(write_file, render_fn=None),
+            Tool(edit_file, render_fn=None),
+            Tool(create_directory, render_fn=render),
+        ]
 
     def code_tools(self) -> list:
         """Create combined filesystem read/write tools for LLM coding tasks.
@@ -525,7 +575,7 @@ class Shell:
                 output = output[: self.max_output_chars] + "\n... [truncated]"
             return output
 
-        return StructuredTool.from_function(
+        raw = StructuredTool.from_function(
             coroutine=_bash_invoke,
             name="bash",
             description=(
@@ -535,6 +585,8 @@ class Shell:
             ),
             args_schema=_bash_schema,
         )
+        render = _default_render if self._ctx else None
+        return Tool(raw, render_fn=render)
 
     def agent_tools(self) -> list:
         """Minimal tool surface for LLM coding agents: bash + write_file + edit_file."""

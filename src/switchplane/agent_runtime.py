@@ -210,6 +210,10 @@ class AgentContext:
             payload["summary"] = summary
         self.emit("tool.result", payload)
 
+    def file_edit(self, path: str, diff: str) -> None:
+        """Emit a file edit event with a unified diff."""
+        self.emit("file.edit", {"path": path, "diff": diff})
+
     def progress(self, message: str, detail: str | list[str] | None = None, **extra) -> None:
         payload: dict[str, Any] = {"message": message, **extra}
         if detail is not None:
