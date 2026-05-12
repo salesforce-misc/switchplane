@@ -109,6 +109,9 @@ def _maybe_attach_debugger() -> None:
     ``0`` requesting an ephemeral free port. Binds 127.0.0.1 only. No-op when
     the env var is unset or empty. Logs a warning and returns instead of
     crashing if debugpy is not installed.
+
+    Note: debugpy permits arbitrary code execution by any client that can reach
+    the listening port; binding 127.0.0.1 keeps this loopback-only.
     """
     raw = os.environ.get("SWITCHPLANE_DEBUG_AGENT", "").strip()
     if not raw:
@@ -129,7 +132,11 @@ def _maybe_attach_debugger() -> None:
             message="SWITCHPLANE_DEBUG_AGENT is set but debugpy is not installed; install switchplane[debug]",
         )
         return
-    bound_host, bound_port = debugpy.listen(("127.0.0.1", port))
+    try:
+        bound_host, bound_port = debugpy.listen(("127.0.0.1", port))
+    except OSError as e:
+        _logger.warning("debug_attach_listen_failed", port=port, error=str(e))
+        return
     _logger.info("debug_attach_listening", host=bound_host, port=bound_port)
     debugpy.wait_for_client()
     _logger.info("debug_attach_client_connected", port=bound_port)
