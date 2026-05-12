@@ -134,7 +134,7 @@ def _maybe_attach_debugger() -> None:
             )
             return
     try:
-        import debugpy  # noqa: PLC0415 — optional dep, import lazily
+        import debugpy
     except ImportError:
         _logger.warning(
             "debug_attach_debugpy_missing",
