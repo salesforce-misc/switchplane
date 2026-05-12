@@ -39,6 +39,7 @@ Issues = "https://github.com/salesforce-misc/switchplane/issues"
 llm = ["langchain-core>=0.3", "rich>=13.0"]
 mcp = ["mcp>=1.0", "switchplane[llm]"]
 test = ["pytest>=7.0", "pytest-asyncio>=0.23", "pytest-cov>=4.0", "pytest-timeout>=2.0", "pytest-xdist>=3.5", "ruff>=0.9"]
+debug = ["debugpy>=1.8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/switchplane"]
