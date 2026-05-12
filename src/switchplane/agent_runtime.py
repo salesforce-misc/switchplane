@@ -126,6 +126,13 @@ def _maybe_attach_debugger() -> None:
         except ValueError:
             _logger.warning("debug_attach_invalid_value", value=raw)
             return
+        if port == 0:
+            _logger.warning(
+                "debug_attach_invalid_value",
+                value=raw,
+                message="use SWITCHPLANE_DEBUG_AGENT=auto for an ephemeral port",
+            )
+            return
     try:
         import debugpy  # noqa: PLC0415 — optional dep, import lazily
     except ImportError:
