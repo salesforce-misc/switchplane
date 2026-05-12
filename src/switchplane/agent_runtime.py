@@ -10,7 +10,7 @@ Remote debugging
 Set ``SWITCHPLANE_DEBUG_AGENT`` in the environment that launches the daemon to
 have each agent subprocess host a debugpy listener on 127.0.0.1 and block
 until a debugger attaches. Values: ``1``/``true`` -> port 5678, any integer ->
-that port (``0`` for an ephemeral port; the bound port is logged to the task
+that port (``auto`` for an ephemeral port; the bound port is logged to the task
 log). Requires ``pip install switchplane[debug]``.
 
 Example VS Code ``launch.json`` entry::
@@ -105,10 +105,10 @@ def _maybe_attach_debugger() -> None:
     """Optionally start a debugpy listener and block until a client attaches.
 
     Controlled by the ``SWITCHPLANE_DEBUG_AGENT`` env var. ``1``/``true`` means
-    the debugpy default port (5678); any other integer is used as-is, with
-    ``0`` requesting an ephemeral free port. Binds 127.0.0.1 only. No-op when
-    the env var is unset or empty. Logs a warning and returns instead of
-    crashing if debugpy is not installed.
+    the debugpy default port (5678); ``auto`` requests an ephemeral free port;
+    any other integer is used as-is. Binds 127.0.0.1 only. No-op when the env
+    var is unset or empty. Logs a warning and returns instead of crashing if
+    debugpy is not installed.
 
     Note: debugpy permits arbitrary code execution by any client that can reach
     the listening port; binding 127.0.0.1 keeps this loopback-only.
@@ -118,6 +118,8 @@ def _maybe_attach_debugger() -> None:
         return
     if raw.lower() in ("1", "true"):
         port = 5678
+    elif raw.lower() == "auto":
+        port = 0
     else:
         try:
             port = int(raw)
