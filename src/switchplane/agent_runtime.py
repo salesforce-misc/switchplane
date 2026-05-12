@@ -4,6 +4,19 @@ This module runs inside agent subprocesses and provides the execution harness
 that agent code calls into. Communication with the control plane is
 bidirectional over a Unix socketpair passed via --ipc-fd, using
 4-byte length-prefixed JSON framing.
+
+Remote debugging
+----------------
+Set ``SWITCHPLANE_DEBUG_AGENT`` in the environment that launches the daemon to
+have each agent subprocess host a debugpy listener on 127.0.0.1 and block
+until a debugger attaches. Values: ``1``/``true`` -> port 5678, any integer ->
+that port (``0`` for an ephemeral port; the bound port is logged to the task
+log). Requires ``pip install switchplane[debug]``.
+
+Example VS Code ``launch.json`` entry::
+
+    {"name": "Attach: switchplane agent", "type": "debugpy", "request": "attach",
+     "connect": {"host": "127.0.0.1", "port": 5678}, "justMyCode": false}
 """
 
 import argparse
@@ -86,6 +99,40 @@ def _write_message_sync(sock: socket.socket, data: bytes) -> None:
     finally:
         if not was_blocking:
             sock.setblocking(False)
+
+
+def _maybe_attach_debugger() -> None:
+    """Optionally start a debugpy listener and block until a client attaches.
+
+    Controlled by the ``SWITCHPLANE_DEBUG_AGENT`` env var. ``1``/``true`` means
+    the debugpy default port (5678); any other integer is used as-is, with
+    ``0`` requesting an ephemeral free port. Binds 127.0.0.1 only. No-op when
+    the env var is unset or empty. Logs a warning and returns instead of
+    crashing if debugpy is not installed.
+    """
+    raw = os.environ.get("SWITCHPLANE_DEBUG_AGENT", "").strip()
+    if not raw:
+        return
+    if raw.lower() in ("1", "true"):
+        port = 5678
+    else:
+        try:
+            port = int(raw)
+        except ValueError:
+            _logger.warning("debug_attach_invalid_value", value=raw)
+            return
+    try:
+        import debugpy  # noqa: PLC0415 — optional dep, import lazily
+    except ImportError:
+        _logger.warning(
+            "debug_attach_debugpy_missing",
+            message="SWITCHPLANE_DEBUG_AGENT is set but debugpy is not installed; install switchplane[debug]",
+        )
+        return
+    bound_host, bound_port = debugpy.listen(("127.0.0.1", port))
+    _logger.info("debug_attach_listening", host=bound_host, port=bound_port)
+    debugpy.wait_for_client()
+    _logger.info("debug_attach_client_connected", port=bound_port)
 
 
 class AgentContext:
@@ -763,5 +810,7 @@ if __name__ == "__main__":
     from switchplane import logging
 
     logging.configure(log_file=_Path(args.log_file) if args.log_file else None)
+
+    _maybe_attach_debugger()
 
     asyncio.run(agent_main(args.ipc_fd, args.entry_point))
