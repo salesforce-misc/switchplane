@@ -65,7 +65,6 @@ _S_SUCCESS = "class:event.success"
 _S_WARN = "class:event.warn"
 _S_LOG = "class:event.log"
 _S_SYSTEM = "class:event.system"
-_S_RESULT = "class:event.result"
 _S_TS = "class:event.ts"
 _S_STREAM = "class:event.stream"
 _S_TOOL = "class:event.tool"
@@ -81,6 +80,10 @@ _STYLE_MAP: dict[str, str] = {
     fmt.LOG: _S_LOG,
     fmt.STREAM: _S_STREAM,
     fmt.TOOL: _S_TOOL,
+    # Plain → no style class. prompt_toolkit treats an empty class
+    # name as "use the default foreground" so the line renders
+    # unstyled regardless of the active theme.
+    fmt.PLAIN: "",
 }
 
 # ---------------------------------------------------------------------------
@@ -520,10 +523,12 @@ class TUISession:
         if not check.ok:
             return
         t = check.result["task"]
-        if status == "completed" and t.get("result_json"):
-            for line in fmt.format_result(t["result_json"]):
-                self._append_line(task_id, [], [(_S_RESULT, f"  {line}")])
-        elif status == "failed" and t.get("error_json"):
+        # `completed` no longer dumps `result_json` here — the live
+        # event stream already showed whatever the agent chose to
+        # render via `stream.flush` (typically a markdown summary
+        # rendered through `_render_markdown`). The full structured
+        # result is still available on demand via `:task show <id>`.
+        if status == "failed" and t.get("error_json"):
             try:
                 err = json.loads(t["error_json"])
                 msg = err.get("error", str(err)) if isinstance(err, dict) else t["error_json"]
@@ -874,7 +879,6 @@ class TUISession:
         task_id = resp.result["task_id"]
         self.add_task(task_id, agent_name, task_name, status="pending")
         self.focused_task_id = task_id
-        self._append_text(task_id, _S_INFO, f"  Task submitted: {task_id[:8]}…")
         self.start_stream(task_id)
         self._refresh()
 
@@ -1505,7 +1509,6 @@ def build_tui_app(session: TUISession) -> Application:
             "event.warn": "#ffaa00",
             "event.log": "#55aacc",
             "event.system": "italic #8888cc",
-            "event.result": "#00ff88",
             "event.stream": "italic #888899",
             "event.tool": "#555577",
             "event.dim": "#444466",

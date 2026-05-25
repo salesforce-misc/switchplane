@@ -101,8 +101,27 @@ def _write_message_sync(sock: socket.socket, data: bytes) -> None:
             sock.setblocking(False)
 
 
+# Paired module-level state shared between `_maybe_attach_debugger`
+# (which binds the listener and is called pre-`AgentContext`) and
+# `_wait_for_debugger` (which blocks on a client and is called once
+# `ctx.progress(...)` is available). Both are populated atomically
+# at the end of a successful `_maybe_attach_debugger` call; either
+# both are non-None or `_debug_bound` is None and `_wait_for_debugger`
+# is a no-op. Holding the imported `debugpy` module here too means
+# `_wait_for_debugger` doesn't re-import — when `_debug_bound` is
+# set, `debugpy` is guaranteed importable in this process.
+#
+# This pairing is intentional for the one-shot subprocess startup
+# flow (the only caller). Don't invoke `_wait_for_debugger`
+# standalone, and don't call `_maybe_attach_debugger` twice — the
+# second invocation would silently overwrite the first listener's
+# port without unbinding it.
+_debug_bound: tuple[str, int] | None = None
+_debugpy: Any = None
+
+
 def _maybe_attach_debugger() -> None:
-    """Optionally start a debugpy listener and block until a client attaches.
+    """Optionally start a debugpy listener (non-blocking).
 
     Controlled by the ``SWITCHPLANE_DEBUG_AGENT`` env var. ``1``/``true`` means
     the debugpy default port (5678); ``auto`` requests an ephemeral free port;
@@ -110,9 +129,16 @@ def _maybe_attach_debugger() -> None:
     var is unset or empty. Logs a warning and returns instead of crashing if
     debugpy is not installed.
 
+    The blocking ``wait_for_client()`` call is deferred to
+    ``_wait_for_debugger`` so an ``AgentContext`` is available for user-facing
+    progress events. The two functions are tied together via the
+    ``_debug_bound`` / ``_debugpy`` module-state pair documented above
+    — call them in order, exactly once each.
+
     Note: debugpy permits arbitrary code execution by any client that can reach
     the listening port; binding 127.0.0.1 keeps this loopback-only.
     """
+    global _debug_bound, _debugpy
     raw = os.environ.get("SWITCHPLANE_DEBUG_AGENT", "").strip()
     if not raw:
         return
@@ -147,8 +173,23 @@ def _maybe_attach_debugger() -> None:
         _logger.warning("debug_attach_listen_failed", port=port, error=str(e))
         return
     _logger.info("debug_attach_listening", host=bound_host, port=bound_port)
-    debugpy.wait_for_client()
-    _logger.info("debug_attach_client_connected", port=bound_port)
+    _debug_bound = (bound_host, bound_port)
+    _debugpy = debugpy
+
+
+def _wait_for_debugger(ctx: "AgentContext") -> None:
+    """Block until a debugpy client attaches, emitting user-facing progress.
+
+    No-op if ``_maybe_attach_debugger`` did not successfully start a listener.
+    Reuses the `debugpy` module reference cached by `_maybe_attach_debugger`
+    — see the `_debug_bound` / `_debugpy` pairing comment above.
+    """
+    if _debug_bound is None:
+        return
+    host, port = _debug_bound
+    ctx.progress(f"execution paused: debugpy listening on {host}:{port}, waiting for client to attach")
+    _debugpy.wait_for_client()
+    _logger.info("debug_attach_client_connected", port=port)
 
 
 class AgentContext:
@@ -788,6 +829,8 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
         return
 
     ctx.emit("task.started", {})
+
+    _wait_for_debugger(ctx)
 
     # Run the task and the command listener concurrently
     task_handle = asyncio.create_task(_run_task(ctx, task_class, params))

@@ -14,6 +14,11 @@ ERROR = "error"
 LOG = "log"
 STREAM = "stream"
 TOOL = "tool"
+# Plain / unstyled — consumers should map this to no styling. Used by
+# terminal status lines (`task.completed` / `task.failed`) where the
+# status emoji carries the pass/fail signal and an additional color
+# style would be redundant noise.
+PLAIN = "plain"
 
 _MAX_DETAIL_LINES = 20
 
@@ -60,7 +65,9 @@ def render_event(event: dict) -> list[EventLine]:
             for det in detail_lines:
                 continuation(DIM, det)
     elif etype == "task.completed":
-        main_line(SUCCESS, "Task completed")
+        # Plain text — the ✅ emoji carries the success signal so the
+        # green-success style would be redundant.
+        main_line(PLAIN, "✅ Task completed")
     elif etype == "task.cancelled":
         main_line(WARN, "Task cancelled")
     elif etype == "task.interrupted":
@@ -70,7 +77,10 @@ def render_event(event: dict) -> list[EventLine]:
     elif etype == "task.resumed":
         main_line(INFO, "Resumed")
     elif etype == "task.failed":
-        main_line(ERROR, f"Task failed: {payload.get('error', '')}")
+        # Main status line is plain text + ❌ emoji (matching the
+        # `task.completed` shape). Traceback stays red so a stack
+        # trace remains visually distinct from the surrounding output.
+        main_line(PLAIN, f"❌ Task failed: {payload.get('error', '')}")
         if "traceback" in payload:
             for tb_line in payload["traceback"].splitlines():
                 lines.append(EventLine([(ERROR, f"    {tb_line}")]))

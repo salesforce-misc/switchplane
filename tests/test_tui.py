@@ -15,7 +15,6 @@ from switchplane.protocol import CliResponse
 from switchplane.tui import (
     _S_ERROR,
     _S_INFO,
-    _S_RESULT,
     _SYSTEM_TAB_ID,
     EventBuffer,
     TUISession,
@@ -1350,13 +1349,18 @@ class TestFetchTerminalResult:
         assert len(session.buffers["t1"].lines) == before
 
     @pytest.mark.asyncio
-    async def test_completed_with_result(self, session):
+    async def test_completed_no_longer_dumps_result_json(self, session):
+        """`completed` doesn't print `result_json` any more — agents
+        render their own summary via `stream.flush` events earlier in
+        the live stream. The structured dict is still in sqlite for
+        `:task show <id>` to surface on demand. Regression guard for
+        the change that moved this responsibility back to the agent."""
         session.add_task("t1", "a", "t")
         session._request = AsyncMock(return_value=_ok({"task": {"result_json": '{"answer": 42}', "error_json": None}}))
+        before = len(session.buffers["t1"].lines)
         await session._fetch_terminal_result("t1", "completed")
-        buf = session.buffers["t1"]
-        assert any(s == _S_RESULT for line in buf.lines for s, _t in _line_segments(line))
-        assert any("42" in t for line in buf.lines for _s, t in _line_segments(line))
+        # No new buffer lines — completed renders nothing here.
+        assert len(session.buffers["t1"].lines) == before
 
     @pytest.mark.asyncio
     async def test_completed_without_result_json_no_output(self, session):
