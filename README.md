@@ -720,6 +720,47 @@ myapp = "myapp.app:main"
 
 Install in editable mode and your app is available as a CLI command.
 
+## Debugging agents
+
+Agents run as detached subprocesses with `stdin` redirected to `/dev/null`, so `pdb.set_trace()` is unusable. Switchplane ships an opt-in [debugpy](https://github.com/microsoft/debugpy) listener you can attach to from VS Code or any debugpy-compatible client.
+
+Install the optional `debug` extra:
+
+```bash
+uv pip install -e '.[debug]'
+```
+
+Set `SWITCHPLANE_DEBUG_AGENT` in the environment that launches the daemon (i.e. before you run your app). Each agent subprocess will host a debugpy listener on `127.0.0.1`, emit a `progress` event announcing the bound port, and block until a client attaches.
+
+| Value | Behavior |
+|---|---|
+| unset / empty | No-op (default) |
+| `1` or `true` | Listen on the default debugpy port `5678` |
+| `auto` | Bind an ephemeral free port — useful when running multiple agents |
+| any other integer | Listen on that specific port |
+
+The bound host and port are logged to the control plane log and surfaced to the running task via a `progress` event, e.g.:
+
+```
+execution paused: debugpy listening on 127.0.0.1:5678, waiting for client to attach
+```
+
+You'll see this line in the CLI / TUI event stream as soon as the task starts, before any task code runs.
+
+VS Code `launch.json`:
+
+```json
+{
+  "name": "Attach: switchplane agent",
+  "type": "debugpy",
+  "request": "attach",
+  "connect": { "host": "127.0.0.1", "port": 5678 },
+  "justMyCode": false
+}
+```
+
+Once attached, set breakpoints anywhere in your task code or LangGraph nodes — execution resumes from `agent_main` and stops at the first hit. The listener is bound to loopback only; debugpy permits arbitrary code execution by any client that can reach the port, so binding `127.0.0.1` keeps it confined to the local machine.
+
 ## Examples
 
 ### devops: Ops review — the Switchplane thesis in action
