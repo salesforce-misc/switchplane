@@ -514,7 +514,17 @@ class TestCliWithMockedDaemon:
 
 
 class TestFollowTask:
-    def test_follow_until_complete(self):
+    def test_follow_until_complete_does_not_dump_result_json(self, capsys):
+        """Mirrors `test_completed_no_longer_dumps_result_json` on the
+        TUI side: even when `result_json` is present in sqlite, the
+        click renderer must not print it on `task.completed`. Agents
+        own their own end-of-run rendering via `stream.flush` events
+        earlier in the live stream; surfacing the dict here would
+        produce a wall of JSON below the agent's table.
+
+        The full structured result is still available on demand via
+        `task show <id>` — that path uses the same `format_result`
+        helper and is unchanged."""
         call_count = 0
 
         def mock_send(method, params=None):
@@ -567,6 +577,14 @@ class TestFollowTask:
             return CliResponse(id="0", ok=True, result={})
 
         _follow_task("t1", mock_send)
+        out = capsys.readouterr().out
+        # Status line still rendered.
+        assert "Task completed" in out
+        # But the JSON payload from `result_json` must NOT show up.
+        # `42` is a load-bearing canary — if it ever reappears here,
+        # the live double-render bug has come back.
+        assert "42" not in out
+        assert "answer" not in out
 
     def test_follow_failed_task(self):
         call_count = 0
