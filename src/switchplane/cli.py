@@ -564,10 +564,12 @@ def _follow_task(task_id: str, send_request) -> None:
                 check = send_request("get_task", {"task_id": task_id})
                 if check.ok:
                     t = check.result["task"]
-                    if status == "completed" and t.get("result_json"):
-                        for line in fmt.format_result(t["result_json"]):
-                            click.echo(f"  {line}")
-                    elif status == "failed" and t.get("error_json"):
+                    # `completed` no longer prints the JSON result here
+                    # — agents render their own summary via
+                    # `stream.flush` events earlier in the stream. The
+                    # full structured result is still available via
+                    # `task show <id>`.
+                    if status == "failed" and t.get("error_json"):
                         try:
                             error_data = json.loads(t["error_json"])
                             if isinstance(error_data, dict):

@@ -101,8 +101,11 @@ def _write_message_sync(sock: socket.socket, data: bytes) -> None:
             sock.setblocking(False)
 
 
+_debug_bound: tuple[str, int] | None = None
+
+
 def _maybe_attach_debugger() -> None:
-    """Optionally start a debugpy listener and block until a client attaches.
+    """Optionally start a debugpy listener (non-blocking).
 
     Controlled by the ``SWITCHPLANE_DEBUG_AGENT`` env var. ``1``/``true`` means
     the debugpy default port (5678); ``auto`` requests an ephemeral free port;
@@ -110,9 +113,14 @@ def _maybe_attach_debugger() -> None:
     var is unset or empty. Logs a warning and returns instead of crashing if
     debugpy is not installed.
 
+    The blocking ``wait_for_client()`` call is deferred to
+    ``_wait_for_debugger`` so an ``AgentContext`` is available for user-facing
+    progress events.
+
     Note: debugpy permits arbitrary code execution by any client that can reach
     the listening port; binding 127.0.0.1 keeps this loopback-only.
     """
+    global _debug_bound
     raw = os.environ.get("SWITCHPLANE_DEBUG_AGENT", "").strip()
     if not raw:
         return
@@ -147,8 +155,26 @@ def _maybe_attach_debugger() -> None:
         _logger.warning("debug_attach_listen_failed", port=port, error=str(e))
         return
     _logger.info("debug_attach_listening", host=bound_host, port=bound_port)
+    _debug_bound = (bound_host, bound_port)
+
+
+def _wait_for_debugger(ctx: "AgentContext") -> None:
+    """Block until a debugpy client attaches, emitting user-facing progress.
+
+    No-op if ``_maybe_attach_debugger`` did not successfully start a listener.
+    """
+    if _debug_bound is None:
+        return
+    try:
+        import debugpy
+    except ImportError:
+        return
+    host, port = _debug_bound
+    ctx.progress(
+        f"execution paused: debugpy listening on {host}:{port}, waiting for client to attach"
+    )
     debugpy.wait_for_client()
-    _logger.info("debug_attach_client_connected", port=bound_port)
+    _logger.info("debug_attach_client_connected", port=port)
 
 
 class AgentContext:
@@ -788,6 +814,8 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
         return
 
     ctx.emit("task.started", {})
+
+    _wait_for_debugger(ctx)
 
     # Run the task and the command listener concurrently
     task_handle = asyncio.create_task(_run_task(ctx, task_class, params))

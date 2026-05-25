@@ -85,7 +85,12 @@ class TestPrintEvent:
                 "payload": {},
             }
         )
-        assert "completed" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        # Status emoji + plain text. The emoji carries the success
+        # signal so the line is no longer styled with the green
+        # SUCCESS color.
+        assert "✅" in out
+        assert "Task completed" in out
 
     def test_cancelled(self, capsys):
         _print_event(
@@ -106,7 +111,11 @@ class TestPrintEvent:
             }
         )
         out = capsys.readouterr().out
-        assert "failed" in out
+        # Status emoji + plain text on the main line. Traceback (when
+        # present) keeps its red ERROR style — see
+        # `test_failed_with_traceback`.
+        assert "❌" in out
+        assert "Task failed" in out
         assert "boom" in out
 
     def test_failed_with_traceback(self, capsys):
