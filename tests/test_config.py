@@ -1,4 +1,11 @@
-from switchplane.config import AppConfig, LLMConfig, _deep_merge, get_agent_config, load_config
+from switchplane.config import (
+    AppConfig,
+    LLMConfig,
+    TuiConfig,
+    _deep_merge,
+    get_agent_config,
+    load_config,
+)
 
 
 class TestDeepMerge:
@@ -44,11 +51,37 @@ class TestAppConfig:
     def test_defaults(self):
         cfg = AppConfig()
         assert isinstance(cfg.llm, LLMConfig)
+        assert isinstance(cfg.tui, TuiConfig)
         assert cfg.agents == {}
 
     def test_with_agents(self):
         cfg = AppConfig(agents={"worker": {"timeout": 30}})
         assert cfg.agents["worker"]["timeout"] == 30
+
+
+class TestTuiConfig:
+    """`TuiConfig` knobs cap per-frame TUI render cost.
+    Defaults are intentionally conservative — see config.py."""
+
+    def test_defaults(self):
+        cfg = TuiConfig()
+        # 2_000 (was 10_000) — render cost grows linearly with this.
+        assert cfg.max_buffer_lines == 2_000
+        # 1.0s (was 0.2s hardcoded in tui.py) — 5× slower spinner
+        # tick cuts baseline render rate proportionally.
+        assert cfg.spinner_interval == 1.0
+
+    def test_overrides(self):
+        cfg = TuiConfig(max_buffer_lines=500, spinner_interval=2.0)
+        assert cfg.max_buffer_lines == 500
+        assert cfg.spinner_interval == 2.0
+
+    def test_loaded_via_app_config(self):
+        """The TuiConfig is reachable as `AppConfig().tui`, which is
+        how the cli.py TUI launch path reads it."""
+        cfg = AppConfig(tui={"max_buffer_lines": 1234, "spinner_interval": 0.5})
+        assert cfg.tui.max_buffer_lines == 1234
+        assert cfg.tui.spinner_interval == 0.5
 
 
 class TestLoadConfig:

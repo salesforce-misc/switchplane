@@ -117,7 +117,14 @@ _HEARTBEAT_INTERVAL = 60  # seconds — must be well under daemon's IDLE_TIMEOUT
 # redraw.
 _REFRESH_DEBOUNCE_SECONDS = 0.033
 _SYSTEM_TAB_ID = "_system"
-_DEFAULT_MAX_BUFFER_LINES = 10_000
+
+# Defaults track the matching fields on `TuiConfig` in
+# `switchplane/config.py`. When these are imported directly (e.g.
+# tests, ad-hoc TUI launches), the constants here apply. When the
+# TUI is started via `run_tui` from a configured Application, the
+# AppConfig values override them.
+_DEFAULT_MAX_BUFFER_LINES = 2_000
+_DEFAULT_SPINNER_INTERVAL = 1.0
 _LINE_PREFIX = "  "  # Left margin for event lines
 _LINE_PREFIX_WIDTH = len(_LINE_PREFIX)
 
@@ -244,9 +251,15 @@ _GROUP_MAP: dict[str, str] = {
 class TUISession:
     """Manages TUI state: event buffers, background streams, and input dispatch."""
 
-    def __init__(self, sock_path: Path, max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES) -> None:
+    def __init__(
+        self,
+        sock_path: Path,
+        max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES,
+        spinner_interval: float = _DEFAULT_SPINNER_INTERVAL,
+    ) -> None:
         self.sock_path = sock_path
         self.max_buffer_lines = max_buffer_lines
+        self.spinner_interval = spinner_interval
         self.buffers: dict[str, EventBuffer] = {}
         self.task_order: list[str] = []  # ordered task IDs for tab bar (excludes _system)
         self.focused_task_id: str | None = _SYSTEM_TAB_ID
@@ -1318,13 +1331,23 @@ class TUISession:
             self._spinner_timer = None
 
     def _tick_spinner(self) -> None:
-        """Advance the spinner frame and schedule the next tick."""
+        """Advance the spinner frame and schedule the next tick.
+
+        Tick interval is `self.spinner_interval` (configurable via
+        `TuiConfig.spinner_interval`). Was hardcoded to 0.2s; that
+        was the load-bearing contributor to a daemon-CPU pin observed
+        on long-running tasks — every tick calls `_refresh()` which
+        invalidates the prompt_toolkit Application, which re-renders
+        the entire scrollback (per-frame O(buffer_size)). At a deep
+        scrollback the per-frame cost can exceed the tick interval
+        and the renderer never yields back to the IPC reader.
+        """
         self._spinner_frame += 1
         self._refresh()
         if self._app is not None and self._has_active_tasks():
             loop = self._app.loop
             if loop is not None:
-                self._spinner_timer = loop.call_later(0.2, self._tick_spinner)
+                self._spinner_timer = loop.call_later(self.spinner_interval, self._tick_spinner)
             else:
                 self._spinner_timer = None
         else:
@@ -1583,6 +1606,7 @@ async def run_tui(
     sock_path: Path,
     initial_tasks: list[tuple[str, str, str, str]] | None = None,
     max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES,
+    spinner_interval: float = _DEFAULT_SPINNER_INTERVAL,
 ) -> None:
     """Run the TUI session.
 
@@ -1592,8 +1616,15 @@ async def run_tui(
             to pre-populate the session with. Pass an empty list to auto-discover
             running tasks from the daemon.
         max_buffer_lines: Maximum lines retained per tab before oldest are trimmed.
+        spinner_interval: Active-task spinner tick interval in seconds. Each tick
+            triggers a full prompt_toolkit redraw, so a low interval combined
+            with a deep scrollback can pin the daemon's CPU.
     """
-    session = TUISession(sock_path, max_buffer_lines=max_buffer_lines)
+    session = TUISession(
+        sock_path,
+        max_buffer_lines=max_buffer_lines,
+        spinner_interval=spinner_interval,
+    )
 
     if initial_tasks is None:
         # Auto-discover running tasks from the daemon

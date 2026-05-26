@@ -10,6 +10,7 @@ import time
 import click
 
 from switchplane import fmt
+from switchplane.config import load_config
 from switchplane.daemon import RuntimePaths, start_daemon, stop_daemon
 from switchplane.protocol import CliRequest, CliResponse
 from switchplane.transport import ControlPlaneClient, is_alive
@@ -46,6 +47,24 @@ def build_cli(app) -> click.Group:
             request = CliRequest(method=method, params=params or {})
             return client.send(request)
 
+    def _load_tui_config():
+        """Read TUI tuning knobs from the app's merged config (user
+        overrides on top of app defaults). Falls back silently to the
+        defaults if the config can't be parsed for any reason — the
+        TUI is the wrong place to surface a config validation error,
+        and the defaults are safe."""
+        try:
+            cfg = load_config(
+                config_path=paths.config_path,
+                default_config_path=app.default_config_path,
+                config_class=app.config_class,
+            )
+            return cfg.tui
+        except Exception:
+            from switchplane.config import TuiConfig
+
+            return TuiConfig()
+
     @click.group(invoke_without_command=True)
     @click.pass_context
     def cli(ctx):
@@ -55,7 +74,15 @@ def build_cli(app) -> click.Group:
             if sys.stdin.isatty():
                 # Interactive: enter TUI dashboard (auto-discovers running tasks)
                 ensure_daemon()
-                asyncio.run(run_tui(paths.sock_path, initial_tasks=None))
+                tui_cfg = _load_tui_config()
+                asyncio.run(
+                    run_tui(
+                        paths.sock_path,
+                        initial_tasks=None,
+                        max_buffer_lines=tui_cfg.max_buffer_lines,
+                        spinner_interval=tui_cfg.spinner_interval,
+                    )
+                )
             else:
                 click.echo(ctx.get_help())
 

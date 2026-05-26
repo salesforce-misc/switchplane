@@ -97,6 +97,15 @@ class TestTUISessionInit:
         s = TUISession(tmp_path / "s.sock", max_buffer_lines=500)
         assert s.max_buffer_lines == 500
 
+    def test_default_spinner_interval(self, session):
+        # Default lives on the TuiConfig but is mirrored as
+        # `_DEFAULT_SPINNER_INTERVAL` in tui.py for ad-hoc launches.
+        assert session.spinner_interval == 1.0
+
+    def test_custom_spinner_interval(self, tmp_path):
+        s = TUISession(tmp_path / "s.sock", spinner_interval=0.25)
+        assert s.spinner_interval == 0.25
+
 
 # ---------------------------------------------------------------------------
 # add_task
