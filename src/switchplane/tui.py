@@ -101,6 +101,21 @@ _STATUS: dict[str, tuple[str, str]] = {
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _HEARTBEAT_INTERVAL = 60  # seconds — must be well under daemon's IDLE_TIMEOUT (300s)
+
+# Debounce window for `TUISession._refresh()`. Without this, every
+# `_append_line` invalidates the prompt_toolkit Application and the
+# renderer can't drain the event queue between redraws — observed in
+# production as a sustained 99%-CPU TUI spin in `split_lines /
+# create_content / write_to_screen` while attached to a long-running
+# task with high event rate (e.g. an LLM tool loop firing tool.invoke
+# events back-to-back). py-spy dump pinned the main thread at 99%
+# inside that render call chain across the whole 10k-line buffer.
+#
+# 33ms (~30 fps) is well below human perception threshold and well
+# above the few-events-per-second steady-state rate, so visible
+# latency is bounded while bursty append-storms collapse to a single
+# redraw.
+_REFRESH_DEBOUNCE_SECONDS = 0.033
 _SYSTEM_TAB_ID = "_system"
 _DEFAULT_MAX_BUFFER_LINES = 10_000
 _LINE_PREFIX = "  "  # Left margin for event lines
@@ -242,6 +257,10 @@ class TUISession:
         self._task_window: Window | None = None
         self._spinner_frame: int = 0
         self._spinner_timer: asyncio.TimerHandle | None = None
+        # Coalesces multiple `_refresh()` calls within
+        # `_REFRESH_DEBOUNCE_SECONDS` into a single `Application.invalidate()`.
+        # See module docstring on `_REFRESH_DEBOUNCE_SECONDS` for why.
+        self._refresh_timer: asyncio.TimerHandle | None = None
 
         # Create the system tab buffer — always present at logical slot 0
         self.buffers[_SYSTEM_TAB_ID] = EventBuffer(
@@ -418,6 +437,37 @@ class TUISession:
             self._append_line(_SYSTEM_TAB_ID, [], [(_S_SYSTEM, msg)])
 
     def _refresh(self) -> None:
+        """Schedule a debounced redraw of the prompt_toolkit Application.
+
+        Direct `Application.invalidate()` calls during a high-rate event
+        burst keep the renderer pinned at 100% CPU re-rendering the full
+        scrollback (`split_lines` is per-frame O(total-rendered-text),
+        not O(visible-area)). py-spy dump on a wedged production session
+        showed the main thread spending 100% CPU in
+        `prompt_toolkit.layout.controls.create_content → split_lines`
+        while the agent's event queue piled up unread.
+
+        Coalesce: schedule one invalidate on a `_REFRESH_DEBOUNCE_SECONDS`
+        timer; subsequent `_refresh` calls inside that window are no-ops
+        (the timer is already armed). Visible latency is bounded by the
+        debounce constant; throughput on bursty append-storms collapses
+        from N redraws to one.
+        """
+        if self._app is None:
+            return
+        if self._refresh_timer is not None:
+            return  # Redraw already scheduled
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Called outside an event loop (test path / pre-startup).
+            # Fall back to immediate invalidate.
+            self._app.invalidate()
+            return
+        self._refresh_timer = loop.call_later(_REFRESH_DEBOUNCE_SECONDS, self._fire_refresh)
+
+    def _fire_refresh(self) -> None:
+        self._refresh_timer = None
         if self._app is not None:
             self._app.invalidate()
 
@@ -1587,6 +1637,9 @@ async def run_tui(
             session._system_stream.cancel()
         for stream in session.streams.values():
             stream.cancel()
+        if session._refresh_timer is not None:
+            session._refresh_timer.cancel()
+            session._refresh_timer = None
         await asyncio.gather(
             *([session._heartbeat] if session._heartbeat else []),
             *([session._system_stream] if session._system_stream else []),

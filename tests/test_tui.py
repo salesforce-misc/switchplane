@@ -413,6 +413,73 @@ class TestAppendLine:
         mock_app.invalidate.assert_called()
 
 
+class TestRefreshDebounce:
+    """`_refresh()` coalesces multiple rapid invalidates into a single
+    redraw on a `_REFRESH_DEBOUNCE_SECONDS` timer.
+
+    Background: high event rate (e.g. an LLM tool loop firing dozens
+    of `tool.invoke` events per second) was triggering one
+    `Application.invalidate()` per `_append_line`, pinning the
+    prompt_toolkit renderer at 100% CPU re-rendering the whole
+    scrollback. py-spy dump on a wedged session showed the main
+    thread spending 100% CPU in `split_lines / create_content`. The
+    debounce caps effective redraw rate so the renderer can drain
+    the event queue between frames.
+    """
+
+    async def test_coalesces_burst_into_single_invalidate(self, session):
+        from switchplane.tui import _REFRESH_DEBOUNCE_SECONDS
+
+        mock_app = MagicMock()
+        session._app = mock_app
+
+        # 10 rapid appends within one event-loop iteration. Inside an
+        # event loop, `_refresh` arms a timer instead of calling
+        # `invalidate` directly.
+        for i in range(10):
+            session._append_line(_SYSTEM_TAB_ID, [], [(_S_INFO, f"line {i}")])
+
+        # Burst phase: timer pending, no invalidate yet.
+        assert mock_app.invalidate.call_count == 0
+        assert session._refresh_timer is not None
+
+        # Let the timer fire — wait slightly longer than the debounce.
+        await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS + 0.01)
+
+        # Exactly one redraw for the whole burst.
+        assert mock_app.invalidate.call_count == 1
+        assert session._refresh_timer is None
+
+    async def test_subsequent_burst_after_fire_arms_new_timer(self, session):
+        from switchplane.tui import _REFRESH_DEBOUNCE_SECONDS
+
+        mock_app = MagicMock()
+        session._app = mock_app
+
+        session._append_line(_SYSTEM_TAB_ID, [], [(_S_INFO, "first burst")])
+        await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS + 0.01)
+        assert mock_app.invalidate.call_count == 1
+
+        session._append_line(_SYSTEM_TAB_ID, [], [(_S_INFO, "second burst")])
+        await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS + 0.01)
+        # Timer re-armed and fired again — debounce doesn't permanently
+        # gate redraws, just throttles rate.
+        assert mock_app.invalidate.call_count == 2
+
+    def test_refresh_outside_event_loop_falls_back_to_direct_invalidate(self, session):
+        """If `_refresh` is called outside a running event loop (test
+        fixtures, pre-startup paths, the existing
+        `test_calls_refresh_with_app_set` shape), arm-a-timer can't
+        work — fall back to a direct `invalidate()` so legacy callers
+        and tests don't silently lose their redraw."""
+        mock_app = MagicMock()
+        session._app = mock_app
+        # Synchronous (no event loop): direct invalidate, no timer.
+        session._refresh()
+        assert mock_app.invalidate.call_count == 1
+        assert session._refresh_timer is None
+
+
 # ---------------------------------------------------------------------------
 # _focused_buf / _system_message / _append_text
 # ---------------------------------------------------------------------------
