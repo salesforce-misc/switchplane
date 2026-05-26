@@ -124,7 +124,7 @@ _SYSTEM_TAB_ID = "_system"
 # TUI is started via `run_tui` from a configured Application, the
 # AppConfig values override them.
 _DEFAULT_MAX_BUFFER_LINES = 2_000
-_DEFAULT_SPINNER_INTERVAL = 1.0
+_DEFAULT_SPINNER_INTERVAL = 0.5
 _LINE_PREFIX = "  "  # Left margin for event lines
 _LINE_PREFIX_WIDTH = len(_LINE_PREFIX)
 
@@ -465,18 +465,30 @@ class TUISession:
         (the timer is already armed). Visible latency is bounded by the
         debounce constant; throughput on bursty append-storms collapses
         from N redraws to one.
+
+        Loop acquisition follows prompt_toolkit's own convention
+        (`self.loop or asyncio.get_running_loop()`, see
+        `prompt_toolkit.application.application.Application.create_background_task`):
+        `self._app.loop` is `None` until `run_async()` runs and after it
+        returns, so during pre-startup or test paths we fall through to
+        the running loop, and if even that's unavailable we invalidate
+        directly so the redraw isn't silently lost.
         """
         if self._app is None:
             return
         if self._refresh_timer is not None:
             return  # Redraw already scheduled
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # Called outside an event loop (test path / pre-startup).
-            # Fall back to immediate invalidate.
-            self._app.invalidate()
-            return
+        loop = self._app.loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No event loop at all (synchronous test path / pre-startup
+                # before the first `run_async`). Direct invalidate so the
+                # redraw isn't lost; legacy callers that don't drive an
+                # event loop still see their refreshes land.
+                self._app.invalidate()
+                return
         self._refresh_timer = loop.call_later(_REFRESH_DEBOUNCE_SECONDS, self._fire_refresh)
 
     def _fire_refresh(self) -> None:

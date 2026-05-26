@@ -100,7 +100,7 @@ class TestTUISessionInit:
     def test_default_spinner_interval(self, session):
         # Default lives on the TuiConfig but is mirrored as
         # `_DEFAULT_SPINNER_INTERVAL` in tui.py for ad-hoc launches.
-        assert session.spinner_interval == 1.0
+        assert session.spinner_interval == 0.5
 
     def test_custom_spinner_interval(self, tmp_path):
         s = TUISession(tmp_path / "s.sock", spinner_interval=0.25)
@@ -417,6 +417,11 @@ class TestAppendLine:
 
     def test_calls_refresh_with_app_set(self, session):
         mock_app = MagicMock()
+        # See TestRefreshDebounce / test_refresh_calls_invalidate_when_app_set:
+        # `loop=None` + no running loop steers `_refresh` to the
+        # direct-invalidate fallback (legacy path). The timer-armed
+        # path is covered separately under TestRefreshDebounce.
+        mock_app.loop = None
         session._app = mock_app
         session._append_line(_SYSTEM_TAB_ID, [], [(_S_INFO, "x")])
         mock_app.invalidate.assert_called()
@@ -440,6 +445,14 @@ class TestRefreshDebounce:
         from switchplane.tui import _REFRESH_DEBOUNCE_SECONDS
 
         mock_app = MagicMock()
+        # `_refresh` follows prompt_toolkit's convention:
+        # `self._app.loop or asyncio.get_running_loop()`. Force the
+        # `or` branch by setting `loop = None` so the test exercises
+        # the path most production callers take pre-`run_async`.
+        # `MagicMock().loop` is itself a (truthy) MagicMock by
+        # default, so without this the test would call
+        # `mock_loop.call_later(...)` and never schedule a real timer.
+        mock_app.loop = None
         session._app = mock_app
 
         # 10 rapid appends within one event-loop iteration. Inside an
@@ -463,6 +476,7 @@ class TestRefreshDebounce:
         from switchplane.tui import _REFRESH_DEBOUNCE_SECONDS
 
         mock_app = MagicMock()
+        mock_app.loop = None  # see comment in coalesces test above
         session._app = mock_app
 
         session._append_line(_SYSTEM_TAB_ID, [], [(_S_INFO, "first burst")])
@@ -482,11 +496,33 @@ class TestRefreshDebounce:
         work — fall back to a direct `invalidate()` so legacy callers
         and tests don't silently lose their redraw."""
         mock_app = MagicMock()
+        # `loop=None` forces the get_running_loop fallback; combined
+        # with no running loop in this synchronous test, both branches
+        # fail and we land on the direct-invalidate fallback.
+        mock_app.loop = None
         session._app = mock_app
         # Synchronous (no event loop): direct invalidate, no timer.
         session._refresh()
         assert mock_app.invalidate.call_count == 1
         assert session._refresh_timer is None
+
+    def test_refresh_uses_app_loop_when_set(self, session):
+        """When `self._app.loop` is set (i.e. `Application.run_async`
+        is in flight), `_refresh` schedules on that loop directly
+        instead of falling through to `asyncio.get_running_loop()`.
+        This matches prompt_toolkit's own
+        `self.loop or get_running_loop()` convention from
+        `Application.create_background_task`."""
+        mock_app = MagicMock()
+        mock_loop = MagicMock()
+        mock_app.loop = mock_loop
+        session._app = mock_app
+
+        session._refresh()
+        # Timer scheduled on the app's loop, not via get_running_loop.
+        mock_loop.call_later.assert_called_once()
+        # No direct invalidate — the timer is the path.
+        mock_app.invalidate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +562,11 @@ class TestInternalHelpers:
 
     def test_refresh_calls_invalidate_when_app_set(self, session):
         mock_app = MagicMock()
+        # `loop=None` + no running loop → direct invalidate fallback,
+        # which is what this legacy test exercises. With a real loop
+        # the path arms a timer instead; the dedicated burst tests
+        # in TestRefreshDebounce cover that branch.
+        mock_app.loop = None
         session._app = mock_app
         session._refresh()
         mock_app.invalidate.assert_called_once()

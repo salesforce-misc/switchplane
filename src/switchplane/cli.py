@@ -10,7 +10,7 @@ import time
 import click
 
 from switchplane import fmt
-from switchplane.config import load_config
+from switchplane.config import TuiConfig, load_config
 from switchplane.daemon import RuntimePaths, start_daemon, stop_daemon
 from switchplane.protocol import CliRequest, CliResponse
 from switchplane.transport import ControlPlaneClient, is_alive
@@ -47,12 +47,21 @@ def build_cli(app) -> click.Group:
             request = CliRequest(method=method, params=params or {})
             return client.send(request)
 
-    def _load_tui_config():
+    def _load_tui_config() -> TuiConfig:
         """Read TUI tuning knobs from the app's merged config (user
-        overrides on top of app defaults). Falls back silently to the
-        defaults if the config can't be parsed for any reason — the
-        TUI is the wrong place to surface a config validation error,
-        and the defaults are safe."""
+        overrides on top of app defaults). Falls back to the defaults
+        if the config can't be parsed for any reason — the TUI itself
+        is the wrong place to crash on a config validation error, and
+        the defaults are safe.
+
+        The fallback is **not silent**: a one-line warning goes to
+        stderr so a typo in `[tui]` (or a stale TOML field after a
+        switchplane upgrade) is at least visible to the operator.
+        Without this, a misnamed knob would silently revert to the
+        default with zero feedback — the kind of bug that takes hours
+        to diagnose because the apparent behavior matches "the config
+        was loaded fine; my override just didn't help".
+        """
         try:
             cfg = load_config(
                 config_path=paths.config_path,
@@ -60,9 +69,11 @@ def build_cli(app) -> click.Group:
                 config_class=app.config_class,
             )
             return cfg.tui
-        except Exception:
-            from switchplane.config import TuiConfig
-
+        except Exception as e:
+            click.echo(
+                f"warning: could not parse TUI config ({e!r}); falling back to defaults",
+                err=True,
+            )
             return TuiConfig()
 
     @click.group(invoke_without_command=True)

@@ -67,9 +67,11 @@ class TestTuiConfig:
         cfg = TuiConfig()
         # 2_000 (was 10_000) — render cost grows linearly with this.
         assert cfg.max_buffer_lines == 2_000
-        # 1.0s (was 0.2s hardcoded in tui.py) — 5× slower spinner
-        # tick cuts baseline render rate proportionally.
-        assert cfg.spinner_interval == 1.0
+        # 0.5s (was 0.2s hardcoded in tui.py) — 2.5× slower spinner
+        # tick cuts baseline render rate proportionally without
+        # crossing the threshold where the spinner reads as "stuck"
+        # rather than "alive".
+        assert cfg.spinner_interval == 0.5
 
     def test_overrides(self):
         cfg = TuiConfig(max_buffer_lines=500, spinner_interval=2.0)

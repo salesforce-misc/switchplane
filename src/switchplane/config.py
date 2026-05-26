@@ -54,15 +54,21 @@ class TuiConfig(BaseModel):
     deep-enough scrollback for routine debugging.
     """
 
-    spinner_interval: float = 1.0
+    spinner_interval: float = 0.5
     """How often the active-task spinner redraws, in seconds.
 
-    Was 0.2 (5 fps); that pinned a redraw-every-200ms cadence on
-    every active-task tab regardless of whether content changed.
-    Combined with a large `max_buffer_lines` it was the load-bearing
-    contributor to the daemon-CPU pin. 1.0 (1 fps) is plenty to
-    signal liveness without driving the renderer into a steady-state
-    loop.
+    Was 0.2 (5 fps), raised here to 0.5 (2 fps). The original 5 fps
+    pinned a redraw-every-200ms cadence on every active-task tab
+    regardless of whether content changed; combined with a large
+    `max_buffer_lines` it was the load-bearing contributor to the
+    daemon-CPU pin.
+
+    2 fps is a 2.5× cost reduction without sacrificing liveness —
+    fast enough that operators read it as "alive" rather than "stuck"
+    (1 fps was tested and felt like the latter). The smaller buffer
+    cap and `_REFRESH_DEBOUNCE_SECONDS` are doing most of the
+    heavy lifting on render cost; the spinner change here is the
+    polish on top.
     """
 
 
