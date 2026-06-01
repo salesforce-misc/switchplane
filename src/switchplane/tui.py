@@ -101,8 +101,30 @@ _STATUS: dict[str, tuple[str, str]] = {
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _HEARTBEAT_INTERVAL = 60  # seconds — must be well under daemon's IDLE_TIMEOUT (300s)
+
+# Debounce window for `TUISession._refresh()`. Without this, every
+# `_append_line` invalidates the prompt_toolkit Application and the
+# renderer can't drain the event queue between redraws — observed in
+# production as a sustained 99%-CPU TUI spin in `split_lines /
+# create_content / write_to_screen` while attached to a long-running
+# task with high event rate (e.g. an LLM tool loop firing tool.invoke
+# events back-to-back). py-spy dump pinned the main thread at 99%
+# inside that render call chain across the whole 10k-line buffer.
+#
+# 33ms (~30 fps) is well below human perception threshold and well
+# above the few-events-per-second steady-state rate, so visible
+# latency is bounded while bursty append-storms collapse to a single
+# redraw.
+_REFRESH_DEBOUNCE_SECONDS = 0.033
 _SYSTEM_TAB_ID = "_system"
-_DEFAULT_MAX_BUFFER_LINES = 10_000
+
+# Defaults track the matching fields on `TuiConfig` in
+# `switchplane/config.py`. When these are imported directly (e.g.
+# tests, ad-hoc TUI launches), the constants here apply. When the
+# TUI is started via `run_tui` from a configured Application, the
+# AppConfig values override them.
+_DEFAULT_MAX_BUFFER_LINES = 2_000
+_DEFAULT_SPINNER_INTERVAL = 0.5
 _LINE_PREFIX = "  "  # Left margin for event lines
 _LINE_PREFIX_WIDTH = len(_LINE_PREFIX)
 
@@ -229,9 +251,15 @@ _GROUP_MAP: dict[str, str] = {
 class TUISession:
     """Manages TUI state: event buffers, background streams, and input dispatch."""
 
-    def __init__(self, sock_path: Path, max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES) -> None:
+    def __init__(
+        self,
+        sock_path: Path,
+        max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES,
+        spinner_interval: float = _DEFAULT_SPINNER_INTERVAL,
+    ) -> None:
         self.sock_path = sock_path
         self.max_buffer_lines = max_buffer_lines
+        self.spinner_interval = spinner_interval
         self.buffers: dict[str, EventBuffer] = {}
         self.task_order: list[str] = []  # ordered task IDs for tab bar (excludes _system)
         self.focused_task_id: str | None = _SYSTEM_TAB_ID
@@ -242,6 +270,10 @@ class TUISession:
         self._task_window: Window | None = None
         self._spinner_frame: int = 0
         self._spinner_timer: asyncio.TimerHandle | None = None
+        # Coalesces multiple `_refresh()` calls within
+        # `_REFRESH_DEBOUNCE_SECONDS` into a single `Application.invalidate()`.
+        # See module docstring on `_REFRESH_DEBOUNCE_SECONDS` for why.
+        self._refresh_timer: asyncio.TimerHandle | None = None
 
         # Create the system tab buffer — always present at logical slot 0
         self.buffers[_SYSTEM_TAB_ID] = EventBuffer(
@@ -418,6 +450,49 @@ class TUISession:
             self._append_line(_SYSTEM_TAB_ID, [], [(_S_SYSTEM, msg)])
 
     def _refresh(self) -> None:
+        """Schedule a debounced redraw of the prompt_toolkit Application.
+
+        Direct `Application.invalidate()` calls during a high-rate event
+        burst keep the renderer pinned at 100% CPU re-rendering the full
+        scrollback (`split_lines` is per-frame O(total-rendered-text),
+        not O(visible-area)). py-spy dump on a wedged production session
+        showed the main thread spending 100% CPU in
+        `prompt_toolkit.layout.controls.create_content → split_lines`
+        while the agent's event queue piled up unread.
+
+        Coalesce: schedule one invalidate on a `_REFRESH_DEBOUNCE_SECONDS`
+        timer; subsequent `_refresh` calls inside that window are no-ops
+        (the timer is already armed). Visible latency is bounded by the
+        debounce constant; throughput on bursty append-storms collapses
+        from N redraws to one.
+
+        Loop acquisition follows prompt_toolkit's own convention
+        (`self.loop or asyncio.get_running_loop()`, see
+        `prompt_toolkit.application.application.Application.create_background_task`):
+        `self._app.loop` is `None` until `run_async()` runs and after it
+        returns, so during pre-startup or test paths we fall through to
+        the running loop, and if even that's unavailable we invalidate
+        directly so the redraw isn't silently lost.
+        """
+        if self._app is None:
+            return
+        if self._refresh_timer is not None:
+            return  # Redraw already scheduled
+        loop = self._app.loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No event loop at all (synchronous test path / pre-startup
+                # before the first `run_async`). Direct invalidate so the
+                # redraw isn't lost; legacy callers that don't drive an
+                # event loop still see their refreshes land.
+                self._app.invalidate()
+                return
+        self._refresh_timer = loop.call_later(_REFRESH_DEBOUNCE_SECONDS, self._fire_refresh)
+
+    def _fire_refresh(self) -> None:
+        self._refresh_timer = None
         if self._app is not None:
             self._app.invalidate()
 
@@ -1268,13 +1343,23 @@ class TUISession:
             self._spinner_timer = None
 
     def _tick_spinner(self) -> None:
-        """Advance the spinner frame and schedule the next tick."""
+        """Advance the spinner frame and schedule the next tick.
+
+        Tick interval is `self.spinner_interval` (configurable via
+        `TuiConfig.spinner_interval`). Was hardcoded to 0.2s; that
+        was the load-bearing contributor to a daemon-CPU pin observed
+        on long-running tasks — every tick calls `_refresh()` which
+        invalidates the prompt_toolkit Application, which re-renders
+        the entire scrollback (per-frame O(buffer_size)). At a deep
+        scrollback the per-frame cost can exceed the tick interval
+        and the renderer never yields back to the IPC reader.
+        """
         self._spinner_frame += 1
         self._refresh()
         if self._app is not None and self._has_active_tasks():
             loop = self._app.loop
             if loop is not None:
-                self._spinner_timer = loop.call_later(0.2, self._tick_spinner)
+                self._spinner_timer = loop.call_later(self.spinner_interval, self._tick_spinner)
             else:
                 self._spinner_timer = None
         else:
@@ -1533,6 +1618,7 @@ async def run_tui(
     sock_path: Path,
     initial_tasks: list[tuple[str, str, str, str]] | None = None,
     max_buffer_lines: int = _DEFAULT_MAX_BUFFER_LINES,
+    spinner_interval: float = _DEFAULT_SPINNER_INTERVAL,
 ) -> None:
     """Run the TUI session.
 
@@ -1542,8 +1628,15 @@ async def run_tui(
             to pre-populate the session with. Pass an empty list to auto-discover
             running tasks from the daemon.
         max_buffer_lines: Maximum lines retained per tab before oldest are trimmed.
+        spinner_interval: Active-task spinner tick interval in seconds. Each tick
+            triggers a full prompt_toolkit redraw, so a low interval combined
+            with a deep scrollback can pin the daemon's CPU.
     """
-    session = TUISession(sock_path, max_buffer_lines=max_buffer_lines)
+    session = TUISession(
+        sock_path,
+        max_buffer_lines=max_buffer_lines,
+        spinner_interval=spinner_interval,
+    )
 
     if initial_tasks is None:
         # Auto-discover running tasks from the daemon
@@ -1587,6 +1680,9 @@ async def run_tui(
             session._system_stream.cancel()
         for stream in session.streams.values():
             stream.cancel()
+        if session._refresh_timer is not None:
+            session._refresh_timer.cancel()
+            session._refresh_timer = None
         await asyncio.gather(
             *([session._heartbeat] if session._heartbeat else []),
             *([session._system_stream] if session._system_stream else []),

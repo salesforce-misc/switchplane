@@ -32,11 +32,52 @@ class LoggingConfig(BaseModel):
     level: str = "debug"  # log level: debug, info, warning, error
 
 
+class TuiConfig(BaseModel):
+    """TUI tuning knobs.
+
+    Defaults are conservative — they trade scrollback depth and
+    spinner liveness for bounded per-frame render cost. The
+    TUI's main thread renders the **entire** scrollback buffer on
+    every redraw (prompt_toolkit's `FormattedTextControl.create_content`
+    is per-frame O(buffer_size), not O(visible-area)), so a buffer
+    much larger than these defaults can pin the daemon's CPU on
+    long-running tasks even when the user isn't actively scrolling.
+    """
+
+    max_buffer_lines: int = 2_000
+    """Maximum lines retained per tab before oldest are trimmed.
+
+    Was 10_000; that produced sustained 99% CPU spins on the daemon
+    main thread for long-running tasks (LLM tool loops with hundreds
+    of events). The render cost grows linearly with this; halving it
+    halves baseline render cost while still giving the operator a
+    deep-enough scrollback for routine debugging.
+    """
+
+    spinner_interval: float = 0.5
+    """How often the active-task spinner redraws, in seconds.
+
+    Was 0.2 (5 fps), raised here to 0.5 (2 fps). The original 5 fps
+    pinned a redraw-every-200ms cadence on every active-task tab
+    regardless of whether content changed; combined with a large
+    `max_buffer_lines` it was the load-bearing contributor to the
+    daemon-CPU pin.
+
+    2 fps is a 2.5× cost reduction without sacrificing liveness —
+    fast enough that operators read it as "alive" rather than "stuck"
+    (1 fps was tested and felt like the latter). The smaller buffer
+    cap and `_REFRESH_DEBOUNCE_SECONDS` are doing most of the
+    heavy lifting on render cost; the spinner change here is the
+    polish on top.
+    """
+
+
 class AppConfig(BaseModel):
     """Top-level configuration."""
 
     llm: LLMConfig = LLMConfig()
     logging: LoggingConfig = LoggingConfig()
+    tui: TuiConfig = TuiConfig()
     agents: dict[str, dict[str, Any]] = {}
 
 

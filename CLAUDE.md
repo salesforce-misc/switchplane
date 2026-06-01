@@ -100,7 +100,7 @@ weather task <task_id> <command> [--key value ...]
 
 In CLI attached mode (`run`/`follow`/`resume`), only `/` task commands are supported inline. Daemon commands are not available — detach with Ctrl+C and use CLI subcommands directly.
 
-**Event buffers** are capped at a configurable `max_buffer_lines` (default 10,000) per tab to bound memory in long-running sessions.
+**Event buffers** are capped at a configurable `[tui] max_buffer_lines` (default 2,000) per tab to bound both memory and per-frame render cost in long-running sessions. Spinner tick interval and refresh-debounce window are also configurable; see `TuiConfig` in `switchplane/config.py`.
 
 ## Build system
 
