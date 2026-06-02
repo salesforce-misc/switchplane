@@ -434,7 +434,7 @@ class TestRunToolLoop:
 
         assert result is final_response
         tool.ainvoke.assert_called_once_with({"q": "test"})
-        ctx.tool_invoke.assert_called_once_with("search", "test")
+        ctx.tool_invoke.assert_called_once_with("search", "q=test")
         # Tool message appended to messages
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
         assert len(tool_msgs) == 1
