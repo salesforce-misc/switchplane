@@ -50,6 +50,14 @@ def render_event(event: dict) -> list[EventLine]:
 
     if etype == "task.started":
         main_line(INFO, "Task started")
+        # Render any startup metadata the task surfaced via
+        # `Task.startup_info()` (resolved model, input identifiers,
+        # etc.) as dim continuation lines under the main banner. Keys
+        # are sorted for stable display; `None` values are rendered
+        # explicitly so a missing optional config field is visible
+        # rather than silently dropped.
+        for key in sorted(payload):
+            continuation(DIM, f"{key}: {payload[key]}")
     elif etype == "task.progress":
         msg = payload.get("message", json.dumps(payload))
         parts = msg.split("\n")

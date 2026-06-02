@@ -275,7 +275,7 @@ async def run_tool_loop(
                     entry.render_fn(ctx, tc["name"], tc["args"])
                 tool = entry.tool
             else:
-                args_summary = " ".join((str(v).splitlines() or [""])[0][:80] for v in tc["args"].values())
+                args_summary = " ".join(f"{k}={v}" for k, v in tc["args"].items())
                 ctx.tool_invoke(tc["name"], args_summary)
                 tool = entry
 

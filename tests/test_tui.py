@@ -1542,6 +1542,43 @@ class TestRenderEvent:
         # At least one style class should be used
         assert len(styles) > 0
 
+    def test_task_started_renders_startup_info_payload(self):
+        """Task subclasses can surface startup metadata
+        (resolved model, work item, etc.) via `Task.startup_info()`,
+        which lands on the `task.started` payload. The renderer
+        attaches one continuation line per key under the main banner
+        so an operator sees the metadata next to the lifecycle event."""
+        from switchplane.fmt import render_event
+
+        ev = {
+            "event_type": "task.started",
+            "payload": {
+                "work_item": "W-20529752",
+                "model": "gpt-5.5",
+                "base_url": "https://example/v1",
+            },
+        }
+        lines = render_event(ev)
+        rendered = ["".join(seg[1] for seg in line.segments) for line in lines]
+
+        # Banner first, then sorted continuation lines.
+        assert rendered[0] == "Task started"
+        assert "  base_url: https://example/v1" in rendered
+        assert "  model: gpt-5.5" in rendered
+        assert "  work_item: W-20529752" in rendered
+
+    def test_task_started_with_empty_payload_renders_only_banner(self):
+        """Tasks that don't override `startup_info` keep the historical
+        single-line `Task started` shape — no trailing blank
+        continuation lines."""
+        from switchplane.fmt import render_event
+
+        ev = {"event_type": "task.started", "payload": {}}
+        lines = render_event(ev)
+
+        assert len(lines) == 1
+        assert lines[0].segments == [("info", "Task started")]
+
 
 # ---------------------------------------------------------------------------
 # _request
