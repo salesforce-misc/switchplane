@@ -1559,9 +1559,7 @@ class TestRenderEvent:
             },
         }
         lines = render_event(ev)
-        rendered = [
-            "".join(seg[1] for seg in line.segments) for line in lines
-        ]
+        rendered = ["".join(seg[1] for seg in line.segments) for line in lines]
 
         # Banner first, then sorted continuation lines.
         assert rendered[0] == "Task started"

@@ -437,10 +437,7 @@ class TestInstantiateTaskAndStartupInfo:
         pkg.mkdir()
         (pkg / "__init__.py").write_text("")
         (pkg / "t.py").write_text(
-            "from switchplane.task import Task\n"
-            "class T(Task):\n"
-            '    name = "t"\n'
-            "    async def run(self, ctx): pass\n"
+            'from switchplane.task import Task\nclass T(Task):\n    name = "t"\n    async def run(self, ctx): pass\n'
         )
         monkeypatch.syspath_prepend(str(tmp_path))
         task_class = _import_task_class("defaultinfo.t")
