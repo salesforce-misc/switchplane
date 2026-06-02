@@ -122,6 +122,19 @@ class Task(ABC):
     mcp_servers: ClassVar[list[str]] = []
     _ctx: "AgentContext | None" = None
 
+    def startup_info(self) -> dict:
+        """Metadata to attach to the `task.started` event payload.
+
+        Override to surface task-specific startup details (resolved
+        model name, input identifiers, etc.) for post-hoc inspection
+        via the events table. Called once after parameter binding,
+        before `run()` — so parameter fields are populated.
+
+        Default returns an empty dict, preserving the historical
+        empty-payload `task.started` shape.
+        """
+        return {}
+
     @classmethod
     def parameters_model(cls) -> type[BaseModel] | None:
         """Build a Pydantic model from Field-annotated attributes.

@@ -721,20 +721,30 @@ def _import_task_class(task_module_path: str) -> type:
     raise RuntimeError(f"No Task subclass found in {task_module_path}")
 
 
-async def _run_task(ctx: AgentContext, task_class: type, raw_params: dict) -> None:
-    """Instantiate and execute a previously-imported Task subclass."""
+def _instantiate_task(ctx: AgentContext, task_class: type, raw_params: dict):
+    """Construct a Task subclass and bind validated parameter fields.
+
+    Split from `_run_task` so callers (specifically `agent_main`) can
+    reach into the populated instance for `startup_info()` *before*
+    `task.started` is emitted. Without this, the emit would have to
+    fire either pre-binding (no access to params) or post-`run()`
+    (defeats the lifecycle signal).
+    """
+    task_instance = task_class()
+    task_instance._ctx = ctx
+    ctx._task = task_instance
+
+    params_model = task_class.parameters_model()
+    if params_model is not None:
+        validated = params_model.model_validate(raw_params)
+        for field_name in params_model.model_fields:
+            setattr(task_instance, field_name, getattr(validated, field_name))
+    return task_instance
+
+
+async def _run_task(ctx: AgentContext, task_instance) -> None:
+    """Execute a previously-instantiated Task."""
     try:
-        task_instance = task_class()
-        task_instance._ctx = ctx
-        ctx._task = task_instance
-
-        # Validate and set parameter fields
-        params_model = task_class.parameters_model()
-        if params_model is not None:
-            validated = params_model.model_validate(raw_params)
-            for field_name in params_model.model_fields:
-                setattr(task_instance, field_name, getattr(validated, field_name))
-
         result = await task_instance.run(ctx)
         # Only auto-complete if the task returned a value AND hasn't already
         # emitted a terminal event (complete/fail) itself.
@@ -828,12 +838,32 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
         sock.close()
         return
 
-    ctx.emit("task.started", {})
+    # Instantiate and bind parameters BEFORE emitting `task.started`,
+    # so `startup_info()` can surface task-specific metadata (resolved
+    # model, input identifiers, etc.) on the lifecycle event for
+    # post-hoc inspection. A failure here surfaces as `task.failed` —
+    # nothing else has run yet.
+    try:
+        task_instance = _instantiate_task(ctx, task_class, params)
+    except Exception as e:
+        ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
+        await _stop_mcp(ctx)
+        await _stop_checkpointer(ctx)
+        _writer.close()
+        sock.close()
+        return
+
+    try:
+        startup_info = task_instance.startup_info() or {}
+    except Exception:
+        # `startup_info` is best-effort metadata; never block startup.
+        startup_info = {}
+    ctx.emit("task.started", startup_info)
 
     _wait_for_debugger(ctx)
 
     # Run the task and the command listener concurrently
-    task_handle = asyncio.create_task(_run_task(ctx, task_class, params))
+    task_handle = asyncio.create_task(_run_task(ctx, task_instance))
     listener_handle = asyncio.create_task(_listen_for_commands(reader, ctx, task_handle))
 
     try:

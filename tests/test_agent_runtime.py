@@ -370,7 +370,7 @@ class TestImportTaskClass:
 class TestRunTask:
     @pytest.mark.asyncio
     async def test_runs_task_from_class(self, tmp_path, monkeypatch):
-        from switchplane.agent_runtime import _run_task
+        from switchplane.agent_runtime import _instantiate_task, _run_task
 
         pkg = tmp_path / "runtaskpkg"
         pkg.mkdir()
@@ -388,13 +388,14 @@ class TestRunTask:
         ctx = AgentContext(task_id="t1", task_name="mytask", ipc_sock=agent_sock, config={})
 
         task_class = _import_task_class("runtaskpkg.mytask")
-        await _run_task(ctx, task_class, {})
+        instance = _instantiate_task(ctx, task_class, {})
+        await _run_task(ctx, instance)
         agent_sock.close()
         cp_sock.close()
 
     @pytest.mark.asyncio
     async def test_runs_task_with_params(self, tmp_path, monkeypatch):
-        from switchplane.agent_runtime import _run_task
+        from switchplane.agent_runtime import _instantiate_task, _run_task
 
         pkg = tmp_path / "paramtaskpkg"
         pkg.mkdir()
@@ -414,8 +415,65 @@ class TestRunTask:
         ctx = AgentContext(task_id="t1", task_name="greet", ipc_sock=agent_sock, config={})
 
         task_class = _import_task_class("paramtaskpkg.greet")
-        await _run_task(ctx, task_class, {"whom": "World"})
+        instance = _instantiate_task(ctx, task_class, {"whom": "World"})
+        assert instance.whom == "World"
+        await _run_task(ctx, instance)
         agent_sock.close()
+
+
+class TestInstantiateTaskAndStartupInfo:
+    """`_instantiate_task` builds the Task subclass with parameters
+    bound, so `agent_main` can call `startup_info()` on it before
+    emitting `task.started`. Without this split, the lifecycle event
+    couldn't carry param-derived metadata."""
+
+    def test_default_startup_info_is_empty(self, ctx, tmp_path, monkeypatch):
+        """Default `Task.startup_info` returns `{}` — preserves the
+        historical empty-payload `task.started` shape for tasks that
+        don't override."""
+        from switchplane.agent_runtime import _instantiate_task
+
+        pkg = tmp_path / "defaultinfo"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "t.py").write_text(
+            "from switchplane.task import Task\n"
+            "class T(Task):\n"
+            '    name = "t"\n'
+            "    async def run(self, ctx): pass\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        task_class = _import_task_class("defaultinfo.t")
+
+        instance = _instantiate_task(ctx, task_class, {})
+
+        assert instance.startup_info() == {}
+
+    def test_subclass_can_surface_payload(self, ctx, tmp_path, monkeypatch):
+        """A subclass that overrides `startup_info` gets to read its
+        own bound params (set by `_instantiate_task`) and ctx.config."""
+        from switchplane.agent_runtime import _instantiate_task
+
+        pkg = tmp_path / "infopkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "t.py").write_text(
+            "from switchplane.task import Task\n"
+            "from pydantic import Field\n"
+            "class T(Task):\n"
+            '    name = "t"\n'
+            "    work_item: str = Field(description='wi')\n"
+            "    def startup_info(self):\n"
+            "        return {'work_item': self.work_item, "
+            "'model': self._ctx.config['llm']['model']}\n"
+            "    async def run(self, ctx): pass\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        task_class = _import_task_class("infopkg.t")
+
+        instance = _instantiate_task(ctx, task_class, {"work_item": "W-1"})
+
+        assert instance.startup_info() == {"work_item": "W-1", "model": "test"}
 
 
 class TestWaitForInput:
