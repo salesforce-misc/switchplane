@@ -315,6 +315,7 @@ async def run_direct_oidc_login(
     }
     if oauth.scopes:
         params["scope"] = oauth.scopes
+    params.update(oauth.extra_authorize_params)
 
     auth_url = f"{oauth.auth_url}?{urlencode(params)}"
 
@@ -436,6 +437,16 @@ async def build_oauth_http_client(
         await _callback_server.start()
 
         async def _redirect(url: str) -> None:
+            # OAuthClientProvider builds the authorize URL internally;
+            # append OAuthConfig.extra_authorize_params (e.g. Slack's
+            # `team` to pin an enterprise) before opening the browser.
+            if oauth.extra_authorize_params:
+                parsed = urlparse(url)
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                for k, v in oauth.extra_authorize_params.items():
+                    query[k] = [v]
+                new_query = urlencode(query, doseq=True)
+                url = parsed._replace(query=new_query).geturl()
             logger.info("oauth_opening_browser", url=url)
             webbrowser.open(url)
 

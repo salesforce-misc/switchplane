@@ -1084,14 +1084,12 @@ class TUISession:
             self.focused_task_id = next(iter(self.task_order), _SYSTEM_TAB_ID)
 
     async def _cmd_clear(self, _args: list[str] | None = None) -> None:
-        """Clear terminal-status tasks from daemon and remove them from the TUI."""
-        resp = await self._request("clear_tasks")
-        if not resp.ok:
-            self._system_message(f"Error: {resp.error}")
-            return
-        count = resp.result.get("deleted", 0)
+        """Remove terminal-status task tabs from the TUI. Database records are preserved."""
+        count = sum(
+            1 for tid, buf in self.buffers.items() if tid != _SYSTEM_TAB_ID and buf.status in _TERMINAL_STATUSES
+        )
         self._remove_terminal_tasks()
-        self._system_message(f"Cleared {count} task(s).")
+        self._system_message(f"Cleared {count} task tab(s) from view.")
         self._refresh()
 
     async def _cmd_task_purge(self, args: list[str] | None = None) -> None:
@@ -1195,8 +1193,8 @@ class TUISession:
                 "    :run <agent> <task> [--key value ...]  — start a task",
                 "    :task follow <task_id>                 — follow an existing task",
                 "    :task cancel [<task_id>]               — cancel focused or specified task",
-                "    :task clear                            — delete completed/failed/cancelled tasks",
-                "    :task purge --yes                      — purge terminal tasks, data files, and logs",
+                "    :task clear                            — remove completed/failed/cancelled task tabs from view",
+                "    :task purge --yes                      — delete terminal tasks from the database (incl. data files and logs)",
                 "    :task list [--status <s>]               — list all tasks (optionally filter by status)",
                 "    :task show <task_id>                   — show task details",
                 "    :task retry <task_id>                  — retry a failed/cancelled task from checkpoint",

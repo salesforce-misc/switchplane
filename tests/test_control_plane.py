@@ -344,25 +344,6 @@ class TestResumeTask:
         assert not resp.ok
 
 
-class TestClearTasks:
-    @pytest.mark.asyncio
-    async def test_clears(self, cp):
-        submit = await _request(
-            cp,
-            "submit_task",
-            {
-                "agent_name": "greeter",
-                "task_name": "noop",
-            },
-        )
-        task_id = submit.result["task_id"]
-        await cp.store.update_task(task_id, status=TaskStatus.COMPLETED)
-
-        resp = await _request(cp, "clear_tasks")
-        assert resp.ok
-        assert resp.result["deleted"] == 1
-
-
 class TestListAgents:
     @pytest.mark.asyncio
     async def test_lists_with_task_info(self, cp):

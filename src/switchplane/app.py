@@ -36,6 +36,7 @@ class OAuthConfig(BaseModel):
     scopes: str | None = None
     auth_url: str | None = None
     token_url: str | None = None
+    extra_authorize_params: dict[str, str] = {}
 
     @property
     def is_direct(self) -> bool:
