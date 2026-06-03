@@ -1343,16 +1343,9 @@ class TestCmdCancel:
 
 class TestCmdClear:
     @pytest.mark.asyncio
-    async def test_api_error_shows_message(self, session):
-        session._request = AsyncMock(return_value=_err("db error"))
-        await session._cmd_clear()
-        assert any("db error" in line for line in _system_lines(session))
-
-    @pytest.mark.asyncio
     async def test_removes_terminal_tasks(self, session):
         for tid, status in [("t1", "completed"), ("t2", "failed"), ("t3", "running")]:
             session.add_task(tid, "a", "t", status=status)
-        session._request = AsyncMock(return_value=_ok({"deleted": 2}))
         await session._cmd_clear()
         assert "t1" not in session.buffers
         assert "t2" not in session.buffers
@@ -1363,7 +1356,6 @@ class TestCmdClear:
         session.add_task("t1", "a", "t", status="completed")
         mock_stream = MagicMock()
         session.streams["t1"] = mock_stream
-        session._request = AsyncMock(return_value=_ok({"deleted": 1}))
         await session._cmd_clear()
         mock_stream.cancel.assert_called_once()
 
@@ -1371,16 +1363,24 @@ class TestCmdClear:
     async def test_refocuses_when_focused_task_cleared(self, session):
         session.add_task("t1", "a", "t", status="completed")
         session.focused_task_id = "t1"
-        session._request = AsyncMock(return_value=_ok({"deleted": 1}))
         await session._cmd_clear()
         assert session.focused_task_id != "t1"
         assert session.focused_task_id == _SYSTEM_TAB_ID
 
     @pytest.mark.asyncio
     async def test_shows_count_message(self, session):
-        session._request = AsyncMock(return_value=_ok({"deleted": 3}))
+        for tid in ["t1", "t2", "t3"]:
+            session.add_task(tid, "a", "t", status="completed")
         await session._cmd_clear()
         assert any("3" in line for line in _system_lines(session))
+
+    @pytest.mark.asyncio
+    async def test_does_not_call_daemon(self, session):
+        """:task clear is a TUI-only operation; database is not touched."""
+        session.add_task("t1", "a", "t", status="completed")
+        session._request = AsyncMock()
+        await session._cmd_clear()
+        session._request.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

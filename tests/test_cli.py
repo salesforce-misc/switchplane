@@ -205,7 +205,7 @@ class TestBuildCli:
         assert "cancel" in task.commands
         assert "follow" in task.commands
         assert "retry" in task.commands
-        assert "clear" in task.commands
+        assert "purge" in task.commands
 
     def test_runtime_status_not_running(self, cli, monkeypatch):
         monkeypatch.setattr("switchplane.cli.is_alive", lambda path: False)
@@ -448,13 +448,6 @@ class TestCliWithMockedDaemon:
         runner = CliRunner()
         result = runner.invoke(cli, ["task", "cancel", "t1"])
         assert "not running" in result.output.lower() or "not found" in result.output.lower()
-
-    def test_task_clear(self, setup):
-        cli, responses = setup
-        responses["clear_tasks"] = {"deleted": 5}
-        runner = CliRunner()
-        result = runner.invoke(cli, ["task", "clear"])
-        assert "5" in result.output
 
     def test_run_task_detached(self, setup):
         cli, responses = setup

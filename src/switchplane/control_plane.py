@@ -452,8 +452,6 @@ class ControlPlane:
                     return await self._notify_task(request)
                 case "retry_from_checkpoint":
                     return await self._retry_from_checkpoint(request)
-                case "clear_tasks":
-                    return await self._clear_tasks(request)
                 case "purge_tasks":
                     return await self._purge_tasks(request)
                 case "get_system_logs":
@@ -733,11 +731,6 @@ class ControlPlane:
                 "status": task.status.value if task else "unknown",
             },
         )
-
-    async def _clear_tasks(self, request: CliRequest) -> CliResponse:
-        """Purge completed task history."""
-        count = await self.store.clear_terminal_tasks()
-        return CliResponse(id=request.id, ok=True, result={"deleted": count})
 
     async def _purge_tasks(self, request: CliRequest) -> CliResponse:
         active = self.subprocess_mgr.active_count if self.subprocess_mgr else 0

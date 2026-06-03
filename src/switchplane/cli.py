@@ -373,17 +373,6 @@ def build_cli(app) -> click.Group:
         click.echo(f"Task {task_id} retried")
         _follow_task(task_id, send_request)
 
-    @task.command("clear")
-    def task_clear():
-        """Purge completed, failed, and cancelled task history."""
-        ensure_daemon()
-        resp = send_request("clear_tasks")
-        if resp.ok:
-            count = resp.result.get("deleted", 0)
-            click.echo(f"Deleted {count} task(s)")
-        else:
-            click.echo(f"Error: {resp.error}", err=True)
-
     @task.command("purge")
     @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
     def task_purge(yes):

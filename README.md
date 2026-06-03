@@ -162,7 +162,8 @@ The TUI uses a three-tier input prefix scheme:
 | `:task list [--status <s>]` | List all tasks (optionally filter by status) |
 | `:task show <task_id>` | Show task details |
 | `:task retry <task_id>` | Retry a failed/cancelled task from last checkpoint |
-| `:task clear` | Delete all completed/failed/cancelled tasks |
+| `:task clear` | Remove completed/failed/cancelled task tabs from view (does not touch the database) |
+| `:task purge --yes` | Permanently delete terminal tasks and their data from the database |
 | `:runtime status` | Show daemon status |
 | `:agent list` | List agents and their tasks |
 | `:help` | Print all available commands |
@@ -264,7 +265,7 @@ Every Switchplane app gets the same CLI structure. Replace `<app>` with your app
 <app> task cancel <task_id>
 <app> task follow <task_id>    # Stream events from a running task
 <app> task retry <task_id>     # Retry a failed/cancelled task from last checkpoint
-<app> task clear               # Purge completed, failed, and cancelled task history
+<app> task purge               # Permanently delete completed/failed/cancelled tasks and their data
 ```
 
 ### Authentication
