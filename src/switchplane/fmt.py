@@ -102,6 +102,12 @@ def render_event(event: dict) -> list[EventLine]:
         main_line(style, parts[0])
         for cont in parts[1:]:
             continuation(style, cont)
+        # `_IPCLogHandler` populates this when the agent logged with
+        # `exc_info=...`. Render in red regardless of the log level so
+        # tracebacks stay visually distinct (matches `task.failed`).
+        if "traceback" in payload:
+            for tb_line in payload["traceback"].splitlines():
+                lines.append(EventLine([(ERROR, f"    {tb_line}")]))
     elif etype == "system.log":
         level = payload.get("level", "info")
         logger_name = payload.get("logger", "")
