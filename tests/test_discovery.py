@@ -40,6 +40,55 @@ class TestDiscoverFromRoot:
         assert "myagent" in app.agents
         assert "hello" in app.agents["myagent"].tasks
 
+    def test_full_discovery_task_as_package(self, tmp_path, app, monkeypatch):
+        """A task can be structured as a package whose __init__.py holds
+        the Task subclass and whose submodules hold helpers. Submodules
+        are imported but only the Task in __init__.py registers (because
+        `_discover_task` filters on `obj.__module__`)."""
+        pkg = tmp_path / "pkgtaskroot"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+
+        agent_dir = pkg / "myagent"
+        agent_dir.mkdir()
+        (agent_dir / "__init__.py").write_text("")
+        (agent_dir / "agent.py").write_text(
+            'from switchplane.agent import AgentSpec\nagent_spec = AgentSpec(agent_name="myagent")\n'
+        )
+
+        tasks_dir = agent_dir / "tasks"
+        tasks_dir.mkdir()
+        (tasks_dir / "__init__.py").write_text("")
+
+        # Package-style task
+        hello_dir = tasks_dir / "hello"
+        hello_dir.mkdir()
+        (hello_dir / "__init__.py").write_text(
+            "from switchplane.task import Task\n"
+            "from .helpers import GREETING\n"
+            "class HelloTask(Task):\n"
+            '    name = "hello"\n'
+            "    async def run(self, ctx): pass\n"
+        )
+        (hello_dir / "helpers.py").write_text(
+            "from switchplane.task import Task\n"
+            'GREETING = "hi"\n'
+            "class _Helper(Task):\n"  # would-be Task in submodule must NOT register
+            '    name = "should-not-appear"\n'
+            "    async def run(self, ctx): pass\n"
+        )
+
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        _discover_from_root(app, "pkgtaskroot")
+
+        assert "myagent" in app.agents
+        assert "hello" in app.agents["myagent"].tasks
+        # Submodule Task subclass must not have leaked into registration —
+        # submodules are imported but only __init__.py-defined classes
+        # match `obj.__module__ == task_module.__name__`.
+        assert "should-not-appear" not in app.agents["myagent"].tasks
+
     def test_missing_root(self, app):
         _discover_from_root(app, "nonexistent.package.xyz")
         assert len(app.agents) == 0
