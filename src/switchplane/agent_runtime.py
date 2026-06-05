@@ -61,14 +61,20 @@ class _IPCLogHandler(_logging.Handler):
 
     def emit(self, record: _logging.LogRecord) -> None:
         try:
-            self._ctx.emit(
-                "log",
-                {
-                    "message": self.format(record),
-                    "level": record.levelname.lower(),
-                    "logger": record.name,
-                },
-            )
+            payload = {
+                "message": self.format(record),
+                "level": record.levelname.lower(),
+                "logger": record.name,
+            }
+            # Carry the formatted traceback when the caller logged with
+            # `exc_info=...`. Without this, exception logs cross the IPC
+            # boundary as one-line messages and the file:line that
+            # actually identifies the failure is dropped — the per-task
+            # JSON log file keeps it (different formatter) but the
+            # events DB and TUI never see it.
+            if record.exc_info:
+                payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))
+            self._ctx.emit("log", payload)
         except Exception:
             pass  # never let logging failures crash the agent
 
@@ -869,7 +875,22 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
     try:
         await task_handle
     except asyncio.CancelledError:
-        ctx.emit("task.cancelled", {})
+        # `_cancelled` is set only by `_listen_for_commands` on receipt
+        # of a `cancel`/`shutdown` from the control plane. A
+        # CancelledError reaching here without that flag came from
+        # *inside* the task body — a leaked `wait_for` cancel, a
+        # cancelled child task awaited up the stack, an aborted
+        # `gather`, or similar. Surfacing those as a bare
+        # `task.cancelled` looks identical to an operator cancel and
+        # erases every clue about what actually went wrong; treat them
+        # as failures with the captured traceback.
+        if ctx._cancelled.is_set():
+            ctx.emit("task.cancelled", {})
+        else:
+            ctx.fail(
+                "CancelledError raised internally (no cancel command received)",
+                traceback.format_exc(),
+            )
     except BaseException as e:
         ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
