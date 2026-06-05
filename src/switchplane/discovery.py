@@ -116,11 +116,15 @@ def _discover_tasks_for_agent(agent_spec: AgentSpec, tasks_package: str) -> None
         logger.debug("no_tasks_package", package=tasks_package, error=str(e))
         return
 
-    # Walk through task modules
+    # Walk through task modules and packages. A task can be a flat module
+    # (`tasks/hello.py`) or a package (`tasks/hello/__init__.py`); the
+    # latter lets a task split its implementation across submodules
+    # without leaking those into discovery — `_discover_task` only picks
+    # up Task subclasses whose `__module__` matches the package's own
+    # `__init__.py`.
     if hasattr(tasks_module, "__path__"):
-        for _importer, modname, ispkg in pkgutil.iter_modules(tasks_module.__path__, prefix=f"{tasks_package}."):
-            if not ispkg:  # Only look at modules, not subpackages
-                _discover_task(agent_spec, modname)
+        for _importer, modname, _ispkg in pkgutil.iter_modules(tasks_module.__path__, prefix=f"{tasks_package}."):
+            _discover_task(agent_spec, modname)
 
 
 def _discover_task(agent_spec: AgentSpec, task_module_path: str) -> None:
