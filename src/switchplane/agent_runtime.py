@@ -73,9 +73,7 @@ class _IPCLogHandler(_logging.Handler):
             # JSON log file keeps it (different formatter) but the
             # events DB and TUI never see it.
             if record.exc_info:
-                payload["traceback"] = "".join(
-                    traceback.format_exception(*record.exc_info)
-                )
+                payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))
             self._ctx.emit("log", payload)
         except Exception:
             pass  # never let logging failures crash the agent
