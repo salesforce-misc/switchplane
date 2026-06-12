@@ -163,6 +163,18 @@ class TestAgentCRUD:
         result = await store.get_agent("a1")
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_clear_all_agents(self, store):
+        await store.upsert_agent(_make_agent("a1", "alpha"))
+        await store.upsert_agent(_make_agent("a2", "beta"))
+        count = await store.clear_all_agents()
+        assert count == 2
+        assert await store.list_agents() == []
+
+    @pytest.mark.asyncio
+    async def test_clear_all_agents_when_empty(self, store):
+        assert await store.clear_all_agents() == 0
+
 
 class TestEvents:
     @pytest.mark.asyncio
@@ -255,23 +267,33 @@ class TestRecoverOrphanedTasks:
 
 class TestClearTerminalTasks:
     @pytest.mark.asyncio
-    async def test_clears_completed_failed_cancelled(self, store):
+    async def test_soft_clears_completed_failed_cancelled(self, store):
+        """clear marks terminal tasks CLEARED; rows and data are preserved."""
         await store.create_task(_make_task("t1", status=TaskStatus.COMPLETED))
         await store.create_task(_make_task("t2", status=TaskStatus.FAILED))
         await store.create_task(_make_task("t3", status=TaskStatus.CANCELLED))
         await store.create_task(_make_task("t4", status=TaskStatus.RUNNING))
 
         await store.add_event("t1", "task.completed", {})
-        await store.add_event("t2", "task.failed", {"error": "boom"})
 
         count = await store.clear_terminal_tasks()
         assert count == 3
 
-        assert await store.get_task("t1") is None
-        assert await store.get_task("t4") is not None
+        # Rows still exist, just flipped to CLEARED.
+        t1 = await store.get_task("t1")
+        assert t1 is not None
+        assert t1.status == TaskStatus.CLEARED
+        assert (await store.get_task("t4")).status == TaskStatus.RUNNING
 
-        events = await store.get_events("t1")
-        assert events == []
+        # Data preserved until purge.
+        assert len(await store.get_events("t1")) == 1
+
+    @pytest.mark.asyncio
+    async def test_clear_is_idempotent(self, store):
+        """Already-cleared tasks are not re-cleared."""
+        await store.create_task(_make_task("t1", status=TaskStatus.COMPLETED))
+        assert await store.clear_terminal_tasks() == 1
+        assert await store.clear_terminal_tasks() == 0
 
     @pytest.mark.asyncio
     async def test_nothing_to_clear(self, store):
@@ -279,14 +301,112 @@ class TestClearTerminalTasks:
         count = await store.clear_terminal_tasks()
         assert count == 0
 
+
+class TestPurgeTerminalTasks:
     @pytest.mark.asyncio
-    async def test_clear_without_checkpoint_tables(self, tmp_path):
-        """clear_terminal_tasks works even if checkpoint tables were never created."""
+    async def test_purges_terminal_and_cleared(self, store):
+        await store.create_task(_make_task("t1", status=TaskStatus.COMPLETED))
+        await store.create_task(_make_task("t2", status=TaskStatus.FAILED))
+        await store.create_task(_make_task("t3", status=TaskStatus.CLEARED))
+        await store.create_task(_make_task("t4", status=TaskStatus.RUNNING))
+        await store.add_event("t1", "task.completed", {})
+
+        count = await store.purge_terminal_tasks()
+        assert count == 3
+
+        assert await store.get_task("t1") is None
+        assert await store.get_task("t3") is None
+        assert await store.get_task("t4") is not None
+        assert await store.get_events("t1") == []
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_purge(self, store):
+        await store.create_task(_make_task("t1", status=TaskStatus.RUNNING))
+        assert await store.purge_terminal_tasks() == 0
+
+    @pytest.mark.asyncio
+    async def test_purges_checkpoints_by_recorded_thread(self, tmp_path):
+        """Checkpoints written under a non-task_id thread are still purged."""
+        from switchplane.checkpoint import setup_tables
+
+        s = Store(tmp_path / "cp.db")
+        await s.initialize()
+        try:
+            await setup_tables(s.connection)
+            await s.create_task(_make_task("task-abc", status=TaskStatus.COMPLETED))
+            # Task checkpointed under a work-item thread id, not its task_id.
+            await s.connection.execute(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) VALUES (?, '', 'c1')",
+                ("W-123",),
+            )
+            await s.connection.commit()
+            await s.record_checkpoint_thread("W-123", "task-abc")
+
+            await s.purge_terminal_tasks()
+
+            cursor = await s.connection.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'W-123'")
+            assert (await cursor.fetchone())[0] == 0
+        finally:
+            await s.close()
+
+    @pytest.mark.asyncio
+    async def test_orphan_sweep_removes_unmapped_checkpoints(self, tmp_path):
+        """Checkpoints with no mapping to any surviving task are swept on purge."""
+        from switchplane.checkpoint import setup_tables
+
+        s = Store(tmp_path / "orphan.db")
+        await s.initialize()
+        try:
+            await setup_tables(s.connection)
+            # A terminal task to trigger purge, unrelated to the orphan.
+            await s.create_task(_make_task("t1", status=TaskStatus.COMPLETED))
+            # Legacy checkpoint with no checkpoint_threads mapping at all.
+            await s.connection.execute(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) VALUES (?, '', 'c1')",
+                ("W-orphan",),
+            )
+            await s.connection.commit()
+
+            await s.purge_terminal_tasks()
+
+            cursor = await s.connection.execute("SELECT COUNT(*) FROM checkpoints")
+            assert (await cursor.fetchone())[0] == 0
+        finally:
+            await s.close()
+
+    @pytest.mark.asyncio
+    async def test_keeps_checkpoints_of_surviving_tasks(self, tmp_path):
+        """A checkpoint mapped to a still-running task is not swept."""
+        from switchplane.checkpoint import setup_tables
+
+        s = Store(tmp_path / "survive.db")
+        await s.initialize()
+        try:
+            await setup_tables(s.connection)
+            await s.create_task(_make_task("done", status=TaskStatus.COMPLETED))
+            await s.create_task(_make_task("live", status=TaskStatus.RUNNING))
+            await s.connection.execute(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) VALUES (?, '', 'c1')",
+                ("live-thread",),
+            )
+            await s.connection.commit()
+            await s.record_checkpoint_thread("live-thread", "live")
+
+            await s.purge_terminal_tasks()
+
+            cursor = await s.connection.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'live-thread'")
+            assert (await cursor.fetchone())[0] == 1
+        finally:
+            await s.close()
+
+    @pytest.mark.asyncio
+    async def test_purge_without_checkpoint_tables(self, tmp_path):
+        """purge works even if checkpoint tables were never created."""
         s = Store(tmp_path / "no_cp.db")
         await s.initialize()
         try:
             await s.create_task(_make_task("t1", status=TaskStatus.COMPLETED))
-            count = await s.clear_terminal_tasks()
+            count = await s.purge_terminal_tasks()
             assert count == 1
         finally:
             await s.close()

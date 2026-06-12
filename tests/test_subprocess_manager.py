@@ -656,8 +656,10 @@ class TestKillAll:
 
 
 class TestCleanupHandle:
-    def test_cleanup_removes_tracking(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_tracking(self):
         store = MagicMock(spec=Store)
+        store.delete_agent = AsyncMock()
         mgr = SubprocessManager(store)
 
         mock_handle = MagicMock()
@@ -669,13 +671,16 @@ class TestCleanupHandle:
         mgr._handles["a1"] = mock_handle
         mgr._task_to_agent["t1"] = "a1"
 
-        mgr._cleanup_handle(mock_handle)
+        await mgr._cleanup_handle(mock_handle)
 
         assert "a1" not in mgr._handles
         assert "t1" not in mgr._task_to_agent
+        store.delete_agent.assert_awaited_once_with("a1")
 
-    def test_cleanup_handles_close_errors(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_handles_close_errors(self):
         store = MagicMock(spec=Store)
+        store.delete_agent = AsyncMock()
         mgr = SubprocessManager(store)
 
         mock_handle = MagicMock()
@@ -689,5 +694,5 @@ class TestCleanupHandle:
         mgr._handles["a1"] = mock_handle
         mgr._task_to_agent["t1"] = "a1"
 
-        mgr._cleanup_handle(mock_handle)  # should not raise
+        await mgr._cleanup_handle(mock_handle)  # should not raise
         assert "a1" not in mgr._handles

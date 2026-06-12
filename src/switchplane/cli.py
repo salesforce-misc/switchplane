@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+from importlib import metadata
 
 import click
 
@@ -15,6 +16,23 @@ from switchplane.daemon import RuntimePaths, start_daemon, stop_daemon
 from switchplane.protocol import CliRequest, CliResponse
 from switchplane.transport import ControlPlaneClient, is_alive
 from switchplane.tui import _parse_kv_args, run_tui
+
+
+def _app_version(app) -> str:
+    """Resolve the version surfaced by `<app> --version`.
+
+    An explicit `Application(version=...)` wins. Otherwise the version is
+    read from installed distribution metadata under `app.dist_name` (which
+    defaults to `app.name`), so apps get `--version` for free from their
+    pyproject `version` with no per-app code. Falls back to "unknown" when
+    the package isn't installed (e.g. running straight from a source tree).
+    """
+    if app.version:
+        return app.version
+    try:
+        return metadata.version(app.dist_name)
+    except metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def build_cli(app) -> click.Group:
@@ -77,6 +95,7 @@ def build_cli(app) -> click.Group:
             return TuiConfig()
 
     @click.group(invoke_without_command=True)
+    @click.version_option(version=_app_version(app), prog_name=app.name)
     @click.pass_context
     def cli(ctx):
         # {app.name} - powered by Switchplane.
@@ -373,6 +392,17 @@ def build_cli(app) -> click.Group:
         click.echo(f"Task {task_id} retried")
         _follow_task(task_id, send_request)
 
+    @task.command("clear")
+    def task_clear():
+        """Clear terminal tasks from view (data preserved; reverse with purge to delete)."""
+        ensure_daemon()
+        resp = send_request("clear_tasks")
+        if resp.ok:
+            count = resp.result.get("cleared", 0)
+            click.echo(f"Cleared {count} task(s)")
+        else:
+            click.echo(f"Error: {resp.error}", err=True)
+
     @task.command("purge")
     @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
     def task_purge(yes):
@@ -380,7 +410,8 @@ def build_cli(app) -> click.Group:
         ensure_daemon()
         if not yes:
             click.confirm(
-                "This will delete all completed, failed, and cancelled tasks and their data. Continue?", abort=True
+                "This will delete all completed, failed, cancelled, and cleared tasks and their data. Continue?",
+                abort=True,
             )
         resp = send_request("purge_tasks")
         if resp.ok:

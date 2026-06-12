@@ -24,6 +24,8 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # Soft-deleted from view by `clear`. Data is preserved until `purge`.
+    CLEARED = "cleared"
 
 
 class TaskRecord(BaseModel):

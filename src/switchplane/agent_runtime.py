@@ -638,7 +638,7 @@ async def _start_checkpointer(ctx: AgentContext) -> None:
         ctx._db_conn.row_factory = aiosqlite.Row
         await ctx._db_conn.execute("PRAGMA journal_mode=WAL")
         await ctx._db_conn.execute("PRAGMA busy_timeout=5000")
-        saver = SqliteCheckpointSaver(ctx._db_conn)
+        saver = SqliteCheckpointSaver(ctx._db_conn, task_id=ctx.task_id)
         await saver.setup()
         ctx._checkpointer = saver
     except Exception as e:

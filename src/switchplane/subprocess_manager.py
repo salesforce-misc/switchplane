@@ -303,7 +303,7 @@ class SubprocessManager:
         except Exception as e:
             logger.error("event_read_error", agent_id=handle.agent_id, error=str(e))
         finally:
-            self._cleanup_handle(handle)
+            await self._cleanup_handle(handle)
 
     async def _handle_event(self, event: AgentEvent) -> int:
         """Process an event from an agent and update persistence. Returns event_id."""
@@ -405,8 +405,8 @@ class SubprocessManager:
 
     # -- Lifecycle ------------------------------------------------------------
 
-    def _cleanup_handle(self, handle: _AgentHandle) -> None:
-        """Remove a handle from tracking and close its socket."""
+    async def _cleanup_handle(self, handle: _AgentHandle) -> None:
+        """Remove a handle from tracking, close its socket, delete its DB row."""
         self._handles.pop(handle.agent_id, None)
         self._task_to_agent.pop(handle.task_id, None)
         try:
@@ -417,6 +417,11 @@ class SubprocessManager:
             handle.sock.close()
         except Exception:
             pass
+        # The agent row is per-launch and meaningless once the process is gone.
+        try:
+            await self.store.delete_agent(handle.agent_id)
+        except Exception as e:
+            logger.warning("agent_row_cleanup_failed", agent_id=handle.agent_id, error=str(e))
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task by sending a cancel command over the IPC socket."""
@@ -475,7 +480,7 @@ class SubprocessManager:
                 handle.reader_task.cancel()
             if handle.stderr_task:
                 handle.stderr_task.cancel()
-            self._cleanup_handle(handle)
+            await self._cleanup_handle(handle)
 
         self._handles.clear()
         self._task_to_agent.clear()
