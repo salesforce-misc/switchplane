@@ -1,4 +1,5 @@
 import json
+from importlib import metadata
 
 import click
 import pytest
@@ -205,6 +206,7 @@ class TestBuildCli:
         assert "cancel" in task.commands
         assert "follow" in task.commands
         assert "retry" in task.commands
+        assert "clear" in task.commands
         assert "purge" in task.commands
 
     def test_runtime_status_not_running(self, cli, monkeypatch):
@@ -222,6 +224,50 @@ class TestBuildCli:
         runner = CliRunner()
         result = runner.invoke(cli, [])
         assert result.exit_code == 0
+
+
+class TestVersion:
+    def test_explicit_version_wins(self, tmp_path):
+        app = Application(name="vapp", runtime_dir=tmp_path / ".vapp", version="9.9.9")
+        cli = build_cli(app)
+        result = CliRunner().invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "vapp" in result.output
+        assert "9.9.9" in result.output
+
+    def test_version_from_dist_metadata(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("switchplane.cli.metadata.version", lambda name: "1.2.3")
+        app = Application(name="metaapp", runtime_dir=tmp_path / ".metaapp")
+        cli = build_cli(app)
+        result = CliRunner().invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "1.2.3" in result.output
+
+    def test_version_uses_dist_name_override(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_version(name):
+            seen["name"] = name
+            return "4.5.6"
+
+        monkeypatch.setattr("switchplane.cli.metadata.version", fake_version)
+        app = Application(name="cliname", runtime_dir=tmp_path / ".cliname", dist_name="pkgname")
+        cli = build_cli(app)
+        result = CliRunner().invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert seen["name"] == "pkgname"
+        assert "4.5.6" in result.output
+
+    def test_version_unknown_when_not_installed(self, tmp_path, monkeypatch):
+        def raise_not_found(name):
+            raise metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr("switchplane.cli.metadata.version", raise_not_found)
+        app = Application(name="ghostapp", runtime_dir=tmp_path / ".ghostapp")
+        cli = build_cli(app)
+        result = CliRunner().invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "unknown" in result.output
 
 
 class _MockClient:

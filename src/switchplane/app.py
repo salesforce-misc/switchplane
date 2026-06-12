@@ -98,6 +98,8 @@ class Application:
         runtime_dir: str | Path | None = None,
         default_config: Path | None = None,
         config_class: "type[AppConfig] | None" = None,
+        version: str | None = None,
+        dist_name: str | None = None,
     ) -> None:
         """Initialize application.
 
@@ -108,6 +110,11 @@ class Application:
             config_class: Pydantic model class used to parse the merged config.
                 Defaults to AppConfig; pass a subclass to support app-specific
                 config sections that are otherwise dropped by the base model.
+            version: Explicit version string for `<app> --version`. When set, it
+                takes precedence over installed-package metadata. Useful when the
+                version comes from somewhere other than the distribution metadata.
+            dist_name: Distribution (package) name to look up version metadata for,
+                when it differs from `name`. Defaults to `name`.
         """
         from switchplane.config import AppConfig as _AppConfig
 
@@ -118,6 +125,8 @@ class Application:
             )
         self.name = name
         self.runtime_dir = Path(runtime_dir).expanduser() if runtime_dir else Path.home() / f".{name}"
+        self.version = version
+        self.dist_name = dist_name or name
         self.default_config_path = default_config
         self.config_class: type[AppConfig] = config_class or _AppConfig
         self.agents: dict[str, AgentSpec] = {}

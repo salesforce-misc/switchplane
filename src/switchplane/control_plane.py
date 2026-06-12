@@ -84,6 +84,12 @@ class ControlPlane:
         if orphaned_count > 0:
             logger.warning("recovered_orphaned_tasks", count=orphaned_count)
 
+        # Agent rows track live subprocesses; none survive a restart, so any
+        # rows left by a previous run are stale.
+        stale_agents = await self.store.clear_all_agents()
+        if stale_agents > 0:
+            logger.warning("cleared_stale_agents", count=stale_agents)
+
         # Set up checkpoint saver
         self.checkpoint_saver = SqliteCheckpointSaver(self.store.connection)
         await self.checkpoint_saver.setup()
@@ -452,6 +458,8 @@ class ControlPlane:
                     return await self._notify_task(request)
                 case "retry_from_checkpoint":
                     return await self._retry_from_checkpoint(request)
+                case "clear_tasks":
+                    return await self._clear_tasks(request)
                 case "purge_tasks":
                     return await self._purge_tasks(request)
                 case "get_system_logs":
@@ -583,7 +591,9 @@ class ControlPlane:
         if not agent_spec:
             return CliResponse(id=request.id, ok=False, error=f"Agent '{original.agent_name}' not found")
 
-        # Reset task status and re-launch with the same task_id (used as checkpoint thread_id)
+        # Reset task status and re-launch with the same task_id. Tasks that
+        # checkpoint resume from their last state (the thread_id they chose is
+        # recorded in checkpoint_threads).
         await self.store.update_task(task_id, status=TaskStatus.PENDING)
         agent_id = await self.subprocess_mgr.launch_agent(agent_spec, original, self.config)
 
@@ -594,10 +604,15 @@ class ControlPlane:
         )
 
     async def _list_tasks(self, request: CliRequest) -> CliResponse:
-        """List tasks with optional status filter."""
+        """List tasks with optional status filter.
+
+        Cleared tasks are hidden unless explicitly requested via status=cleared.
+        """
         status_str = request.params.get("status")
         status = TaskStatus(status_str) if status_str else None
         tasks = await self.store.list_tasks(status=status)
+        if status is None:
+            tasks = [t for t in tasks if t.status != TaskStatus.CLEARED]
         return CliResponse(
             id=request.id,
             ok=True,
@@ -732,13 +747,21 @@ class ControlPlane:
             },
         )
 
+    async def _clear_tasks(self, request: CliRequest) -> CliResponse:
+        """Soft-delete terminal tasks (mark CLEARED) so they drop out of view.
+
+        Data is preserved until purge — only the status changes.
+        """
+        count = await self.store.clear_terminal_tasks()
+        return CliResponse(id=request.id, ok=True, result={"cleared": count})
+
     async def _purge_tasks(self, request: CliRequest) -> CliResponse:
         active = self.subprocess_mgr.active_count if self.subprocess_mgr else 0
         if active > 0:
             return CliResponse(id=request.id, ok=False, error="Cannot purge while tasks are running")
 
         task_ids = await self.store.get_terminal_task_ids()
-        await self.store.clear_terminal_tasks()
+        await self.store.purge_terminal_tasks()
 
         for task_id in task_ids:
             shutil.rmtree(self.paths.data_dir / task_id, ignore_errors=True)

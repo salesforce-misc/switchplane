@@ -10,6 +10,16 @@ import aiosqlite
 from switchplane.agent import AgentRecord
 from switchplane.task import TaskRecord, TaskStatus
 
+# Statuses eligible to be cleared from view (terminal, but not already cleared).
+_CLEARABLE_STATUSES = (
+    TaskStatus.COMPLETED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+)
+
+# Statuses eligible for hard deletion by purge — clearable plus already-cleared.
+_PURGEABLE_STATUSES = (*_CLEARABLE_STATUSES, TaskStatus.CLEARED.value)
+
 
 class Store:
     """Async SQLite store for control plane persistence."""
@@ -80,6 +90,17 @@ class Store:
                     event_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+                )
+            """)
+
+            # Maps a checkpointer thread_id to the task that wrote it. Tasks may
+            # use any thread_id (LangGraph's, e.g. a stable work-item key), so we
+            # cannot assume thread_id == task_id when purging checkpoints.
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_threads (
+                    thread_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    PRIMARY KEY (thread_id, task_id)
                 )
             """)
 
@@ -481,17 +502,71 @@ class Store:
 
         return len(task_ids)
 
+    async def clear_all_agents(self) -> int:
+        """Delete all agent rows. Agent rows track live subprocesses; after a
+        daemon restart none of the recorded agents are alive, so any rows left
+        behind by a crash are stale. Returns the number of rows deleted.
+        """
+        if not self._db:
+            raise RuntimeError("Store not initialized")
+        cursor = await self._db.execute("DELETE FROM agents")
+        await self._db.commit()
+        return cursor.rowcount
+
+    async def record_checkpoint_thread(self, thread_id: str, task_id: str) -> None:
+        """Record that ``task_id`` writes checkpoints under ``thread_id``.
+
+        Tasks may use any thread_id (e.g. a stable work-item key), so purge
+        relies on this mapping rather than assuming thread_id == task_id.
+        """
+        if not self._db:
+            raise RuntimeError("Store not initialized")
+        await self._db.execute(
+            "INSERT OR IGNORE INTO checkpoint_threads (thread_id, task_id) VALUES (?, ?)",
+            (thread_id, task_id),
+        )
+        await self._db.commit()
+
     async def get_terminal_task_ids(self) -> list[str]:
         if not self._db:
             raise RuntimeError("Store not initialized")
+        placeholders = ",".join("?" * len(_PURGEABLE_STATUSES))
         cursor = await self._db.execute(
-            "SELECT task_id FROM tasks WHERE status IN (?, ?, ?)",
-            ("completed", "failed", "cancelled"),
+            f"SELECT task_id FROM tasks WHERE status IN ({placeholders})",
+            _PURGEABLE_STATUSES,
         )
         return [row[0] for row in await cursor.fetchall()]
 
     async def clear_terminal_tasks(self) -> int:
-        """Delete terminal tasks (completed, failed, cancelled) and their associated events and checkpoints.
+        """Soft-delete terminal tasks by marking them CLEARED.
+
+        Cleared tasks are hidden from view but their data (events, checkpoints,
+        files) is preserved until an explicit purge. Already-cleared tasks are
+        left untouched.
+
+        Returns:
+            Number of tasks cleared.
+        """
+        if not self._db:
+            raise RuntimeError("Store not initialized")
+
+        placeholders = ",".join("?" * len(_CLEARABLE_STATUSES))
+        now = datetime.now(UTC).isoformat()
+        cursor = await self._db.execute(
+            f"UPDATE tasks SET status = ?, updated_at = ? WHERE status IN ({placeholders})",
+            (TaskStatus.CLEARED.value, now, *_CLEARABLE_STATUSES),
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
+    async def purge_terminal_tasks(self) -> int:
+        """Hard-delete terminal/cleared tasks and all their associated rows.
+
+        Deletes the tasks plus their events and checkpoint data. Checkpoints are
+        removed by the thread_ids recorded for those tasks (see
+        ``record_checkpoint_thread``); any checkpoint thread that no longer maps
+        to a surviving task is also swept, reclaiming orphaned rows written
+        before the mapping existed.
 
         Returns:
             Number of tasks deleted.
@@ -499,10 +574,10 @@ class Store:
         if not self._db:
             raise RuntimeError("Store not initialized")
 
-        # Get IDs of all terminal tasks
+        status_placeholders = ",".join("?" * len(_PURGEABLE_STATUSES))
         cursor = await self._db.execute(
-            "SELECT task_id FROM tasks WHERE status IN (?, ?, ?)",
-            ("completed", "failed", "cancelled"),
+            f"SELECT task_id FROM tasks WHERE status IN ({status_placeholders})",
+            _PURGEABLE_STATUSES,
         )
         task_ids = [row[0] for row in await cursor.fetchall()]
 
@@ -516,22 +591,54 @@ class Store:
             task_ids,
         )
 
-        # Checkpoint tables are created by checkpoint.py, not by Store.initialize().
-        # Guard with IF EXISTS so clear works even if checkpointing was never used.
-        cursor = await self._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
-        if await cursor.fetchone():
-            await self._db.execute(
-                f"DELETE FROM checkpoints WHERE thread_id IN ({placeholders})",
-                task_ids,
-            )
+        # Resolve the thread_ids these tasks wrote checkpoints under.
         cursor = await self._db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoint_writes'"
+            f"SELECT DISTINCT thread_id FROM checkpoint_threads WHERE task_id IN ({placeholders})",
+            task_ids,
         )
-        if await cursor.fetchone():
-            await self._db.execute(
-                f"DELETE FROM checkpoint_writes WHERE thread_id IN ({placeholders})",
+        thread_ids = {row[0] for row in await cursor.fetchall()}
+
+        # Orphan sweep: any checkpoint thread no longer referenced by a surviving
+        # task (e.g. rows written before the mapping table existed) is dead data.
+        cursor = await self._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
+        has_checkpoints = await cursor.fetchone() is not None
+        if has_checkpoints:
+            survivor_placeholders = ",".join("?" * len(task_ids))
+            cursor = await self._db.execute(
+                f"""
+                SELECT DISTINCT thread_id FROM checkpoints
+                WHERE thread_id NOT IN (
+                    SELECT thread_id FROM checkpoint_threads
+                    WHERE task_id NOT IN ({survivor_placeholders})
+                )
+                """,
                 task_ids,
             )
+            thread_ids.update(row[0] for row in await cursor.fetchall())
+
+        # Checkpoint tables are created by checkpoint.py, not by Store.initialize().
+        # Guard with IF EXISTS so purge works even if checkpointing was never used.
+        if thread_ids:
+            thread_list = list(thread_ids)
+            thread_placeholders = ",".join("?" * len(thread_list))
+            if has_checkpoints:
+                await self._db.execute(
+                    f"DELETE FROM checkpoints WHERE thread_id IN ({thread_placeholders})",
+                    thread_list,
+                )
+            cursor = await self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoint_writes'"
+            )
+            if await cursor.fetchone():
+                await self._db.execute(
+                    f"DELETE FROM checkpoint_writes WHERE thread_id IN ({thread_placeholders})",
+                    thread_list,
+                )
+
+        await self._db.execute(
+            f"DELETE FROM checkpoint_threads WHERE task_id IN ({placeholders})",
+            task_ids,
+        )
         await self._db.execute(
             f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
             task_ids,

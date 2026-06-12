@@ -1346,6 +1346,7 @@ class TestCmdClear:
     async def test_removes_terminal_tasks(self, session):
         for tid, status in [("t1", "completed"), ("t2", "failed"), ("t3", "running")]:
             session.add_task(tid, "a", "t", status=status)
+        session._request = AsyncMock(return_value=_ok({"cleared": 2}))
         await session._cmd_clear()
         assert "t1" not in session.buffers
         assert "t2" not in session.buffers
@@ -1354,6 +1355,7 @@ class TestCmdClear:
     @pytest.mark.asyncio
     async def test_cancels_streams_for_removed_tasks(self, session):
         session.add_task("t1", "a", "t", status="completed")
+        session._request = AsyncMock(return_value=_ok({"cleared": 1}))
         mock_stream = MagicMock()
         session.streams["t1"] = mock_stream
         await session._cmd_clear()
@@ -1362,6 +1364,7 @@ class TestCmdClear:
     @pytest.mark.asyncio
     async def test_refocuses_when_focused_task_cleared(self, session):
         session.add_task("t1", "a", "t", status="completed")
+        session._request = AsyncMock(return_value=_ok({"cleared": 1}))
         session.focused_task_id = "t1"
         await session._cmd_clear()
         assert session.focused_task_id != "t1"
@@ -1371,16 +1374,26 @@ class TestCmdClear:
     async def test_shows_count_message(self, session):
         for tid in ["t1", "t2", "t3"]:
             session.add_task(tid, "a", "t", status="completed")
+        session._request = AsyncMock(return_value=_ok({"cleared": 3}))
         await session._cmd_clear()
         assert any("3" in line for line in _system_lines(session))
 
     @pytest.mark.asyncio
-    async def test_does_not_call_daemon(self, session):
-        """:task clear is a TUI-only operation; database is not touched."""
+    async def test_calls_daemon(self, session):
+        """:task clear persists via the daemon (soft-delete to CLEARED)."""
         session.add_task("t1", "a", "t", status="completed")
-        session._request = AsyncMock()
+        session._request = AsyncMock(return_value=_ok({"cleared": 1}))
         await session._cmd_clear()
-        session._request.assert_not_called()
+        session._request.assert_awaited_once_with("clear_tasks")
+
+    @pytest.mark.asyncio
+    async def test_keeps_tabs_on_error(self, session):
+        """A daemon error leaves tabs in place and surfaces the error."""
+        session.add_task("t1", "a", "t", status="completed")
+        session._request = AsyncMock(return_value=_err("boom"))
+        await session._cmd_clear()
+        assert "t1" in session.buffers
+        assert any("boom" in line for line in _system_lines(session))
 
 
 # ---------------------------------------------------------------------------

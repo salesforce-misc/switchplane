@@ -47,6 +47,18 @@ async def setup_tables(db: aiosqlite.Connection) -> None:
         )
     """)
 
+    # Maps a checkpointer thread_id to the switchplane task that wrote it, so
+    # purge can find checkpoints even when thread_id != task_id. Also created by
+    # Store.initialize(); duplicated here because the agent subprocess writes via
+    # its own connection.
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoint_threads (
+            thread_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            PRIMARY KEY (thread_id, task_id)
+        )
+    """)
+
     await db.commit()
 
 
@@ -55,10 +67,16 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
 
     serde = JsonPlusSerializer()
 
-    def __init__(self, db: aiosqlite.Connection):
-        """Initialize with an existing SQLite connection."""
+    def __init__(self, db: aiosqlite.Connection, task_id: str | None = None):
+        """Initialize with an existing SQLite connection.
+
+        ``task_id`` is the owning switchplane task. When set, each saved
+        checkpoint records a thread_id -> task_id mapping so purge can later
+        delete this task's checkpoints regardless of the thread_id chosen.
+        """
         super().__init__()
         self.db = db
+        self.task_id = task_id
 
     async def setup(self) -> None:
         """Create checkpoint tables if they don't exist."""
@@ -275,6 +293,12 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
                 metadata_type,
             ),
         )
+
+        if self.task_id is not None:
+            await self.db.execute(
+                "INSERT OR IGNORE INTO checkpoint_threads (thread_id, task_id) VALUES (?, ?)",
+                (thread_id, self.task_id),
+            )
 
         await self.db.commit()
 
