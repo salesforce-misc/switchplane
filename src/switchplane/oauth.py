@@ -388,7 +388,7 @@ def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
     1s each (~3s total) and never outlast a real throttle window. Both inputs
     are clamped to a sane maximum.
     """
-    backoff = _RETRY_BACKOFF_BASE_SECONDS * (2 ** attempt)
+    backoff = _RETRY_BACKOFF_BASE_SECONDS * (2**attempt)
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         try:
@@ -455,9 +455,7 @@ class RetryTransport(httpx.AsyncBaseTransport):
             attempt += 1
 
 
-def _build_transport(
-    config: McpServerConfig, ssl_verify: str | bool
-) -> httpx.AsyncBaseTransport:
+def _build_transport(config: McpServerConfig, ssl_verify: str | bool) -> httpx.AsyncBaseTransport:
     """Build the httpx transport for an MCP OAuth client.
 
     Returns an ``AsyncHTTPTransport`` with TLS verification configured, wrapped

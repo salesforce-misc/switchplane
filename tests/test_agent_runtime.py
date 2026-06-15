@@ -634,24 +634,30 @@ class TestStartStopMcp:
         captured = {}
 
         def _factory(configs, runtime_dir=None):
-            mgr = _FakeManager(configs).set_errors([
-                ("slack", "Failed to start MCP server 'slack': 429"),
-                ("dxmcp", "Failed to start MCP server 'dxmcp': auth"),
-            ])
+            mgr = _FakeManager(configs).set_errors(
+                [
+                    ("slack", "Failed to start MCP server 'slack': 429"),
+                    ("dxmcp", "Failed to start MCP server 'dxmcp': auth"),
+                ]
+            )
             captured["mgr"] = mgr
             return mgr
 
         monkeypatch.setattr(mcp_mod, "McpManager", _factory)
 
         with pytest.raises(RuntimeError) as ei:
-            await _start_mcp(_ctx, [
-                {"name": "slack", "url": "http://x/", "optional": True},
-                {"name": "dxmcp", "url": "http://y/"},
-            ])
+            await _start_mcp(
+                _ctx,
+                [
+                    {"name": "slack", "url": "http://x/", "optional": True},
+                    {"name": "dxmcp", "url": "http://y/"},
+                ],
+            )
         # Only the required server is named in the abort message.
         assert "dxmcp" in str(ei.value)
         assert "slack" not in str(ei.value)
         assert captured["mgr"].stopped is True
+
 
 class TestUnwrapCause:
     """`_unwrap_cause` recovers the real leaf from masked/wrapped errors."""
