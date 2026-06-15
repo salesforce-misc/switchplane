@@ -419,7 +419,7 @@ class RetryTransport(httpx.AsyncBaseTransport):
         self._max_retries = max_retries
         self._server_name = server_name
 
-    async def __aenter__(self) -> "RetryTransport":
+    async def __aenter__(self) -> RetryTransport:
         await self._wrapped.__aenter__()
         return self
 
