@@ -896,6 +896,69 @@ class TestAgentMainBoundary:
         assert "ExceptionGroup" not in failed[0].payload["error"]
         assert "CancelledError raised internally" not in failed[0].payload["error"]
 
+    def test_grouped_process_signal_reraised(self, tmp_path, monkeypatch):
+        """A process signal (SystemExit/KeyboardInterrupt) wrapped in a
+        BaseExceptionGroup (e.g. a TaskGroup child raised it) must still be
+        re-raised so the interpreter tears down, not swallowed into an ordinary
+        task.failed. The leaf is unwrapped and reported, then re-raised.
+
+        Uses SystemExit because KeyboardInterrupt aborts the pytest session;
+        both take the same boundary branch. Driven via a dedicated
+        ``asyncio.run`` loop (not pytest-asyncio's shared loop) because the
+        re-raised signal propagates out of ``agent_main`` and would corrupt a
+        loop the runner reuses for other tests.
+
+        The group is raised directly: CPython's ``asyncio.TaskGroup`` extracts
+        base exceptions and re-raises them bare (hitting the dedicated branch),
+        but anyio task groups and nested groups can leave a process signal
+        wrapped — which is the case this branch guards.
+        """
+        pkg = tmp_path / "ampkg_exit"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ex.py").write_text(
+            "from switchplane.task import Task\n"
+            "class ExitTask(Task):\n"
+            '    name = "ex"\n'
+            "    async def run(self, ctx):\n"
+            '        raise BaseExceptionGroup("grp", [SystemExit("bye")])\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ipc_fd = os.dup(agent_sock.fileno())
+        try:
+            execute = AgentCommand(
+                type="execute_task",
+                task_id="t1",
+                payload={
+                    "task_name": "ex",
+                    "params": {},
+                    "task_module": "ampkg_exit.ex",
+                    "config": {},
+                    "mcp_servers": [],
+                    "db_path": None,
+                    "log_level": "debug",
+                },
+            )
+            _write_message_sync(cp_sock, execute.model_dump_json().encode())
+            with pytest.raises(SystemExit):
+                asyncio.run(agent_main(ipc_fd, entry_point="test"))
+
+            events = []
+            cp_sock.setblocking(False)
+            while True:
+                try:
+                    events.append(AgentEvent.model_validate_json(_recv_message(cp_sock)))
+                except (BlockingIOError, ConnectionError):
+                    break
+            failed = [e for e in events if e.type == "task.failed"]
+            assert len(failed) == 1
+            assert failed[0].payload["error"] == "SystemExit: bye"
+        finally:
+            agent_sock.close()
+            cp_sock.close()
+
     @pytest.mark.asyncio
     async def test_plain_exception_reported(self, tmp_path, monkeypatch):
         pkg = tmp_path / "ampkg_raise"

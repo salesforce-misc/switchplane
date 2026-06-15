@@ -946,6 +946,16 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
             ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
         raise
     except BaseException as e:
+        leaf = _unwrap_cause(e)
+        # A `BaseExceptionGroup` can wrap a `KeyboardInterrupt`/`SystemExit`
+        # (e.g. a `TaskGroup` child raised one) — the group itself is neither
+        # type, so it lands here rather than the dedicated branch above. Honour
+        # the same contract: report (unless already terminal) and re-raise the
+        # signal so the interpreter still tears down.
+        if isinstance(leaf, (KeyboardInterrupt, SystemExit)):
+            if not ctx._completed:
+                ctx.fail(f"{type(leaf).__name__}: {leaf}", traceback.format_exc())
+            raise leaf from e
         # If the task already reported its own terminal outcome (complete or
         # fail), a fault raised *after* that — e.g. resource teardown in
         # `_agent_resources` surfacing a trapped transport fault as a
@@ -954,7 +964,7 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
         # unconditionally, so a stray `task.failed` here would overwrite a
         # recorded `task.completed`. Log the teardown fault and move on.
         if ctx._completed:
-            if (leaf := _unwrap_cause(e)) is not None:
+            if leaf is not None:
                 _logger.warning(
                     "resource_teardown_failed_after_terminal",
                     error=f"{type(leaf).__name__}: {leaf}",
@@ -969,7 +979,7 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
         # `CancelledError` and lands us here rather than as a bare cancel.
         elif ctx._cancelled.is_set() and task_handle.cancelling() > 0:
             ctx.emit("task.cancelled", {})
-        elif (leaf := _unwrap_cause(e)) is not None:
+        elif leaf is not None:
             # A real fault during execution. Because resources are owned inside
             # the task (`_agent_resources`), a masked transport fault surfaces
             # on scope teardown as a `BaseExceptionGroup` chained over the
