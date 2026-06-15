@@ -271,6 +271,26 @@ class TestMcpManager:
         assert manager._sessions == {}
 
     @pytest.mark.asyncio
+    async def test_start_returns_name_keyed_errors(self, monkeypatch):
+        """A failed session is reported as (name, message), not just text, so
+        callers can attribute the failure to its config without parsing."""
+        cfg = McpServerConfig(name="boomsrv", command=["echo"])
+        manager = McpManager([cfg])
+
+        async def _boom(self, stack):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(McpSession, "start", _boom)
+
+        errors = await manager.start()
+        assert len(errors) == 1
+        name, msg = errors[0]
+        assert name == "boomsrv"
+        assert "boomsrv" in msg and "kaboom" in msg
+        assert manager._sessions == {}  # the failed session is not registered
+        await manager.stop()
+
+    @pytest.mark.asyncio
     async def test_langchain_tools_with_sessions(self):
         cfg = McpServerConfig(name="test", command=["echo"])
         manager = McpManager([cfg])

@@ -177,11 +177,17 @@ class McpManager:
         """Get an MCP session by server name, returning *default* if not found."""
         return self._sessions.get(name, default)
 
-    async def start(self) -> list[str]:
-        """Start all MCP sessions. Returns a list of error messages for sessions that failed."""
+    async def start(self) -> list[tuple[str, str]]:
+        """Start all MCP sessions.
+
+        Returns a list of ``(server_name, error_message)`` tuples for sessions
+        that failed to start. The name is reported structurally rather than only
+        embedded in the message so callers can attribute a failure to its config
+        (e.g. to honor a per-server ``optional`` flag) without re-parsing text.
+        """
         self._stack = AsyncExitStack()
         await self._stack.__aenter__()
-        errors = []
+        errors: list[tuple[str, str]] = []
         for config in self._configs:
             session = McpSession(config, runtime_dir=self._runtime_dir)
             try:
@@ -192,7 +198,7 @@ class McpManager:
                     raise
                 msg = f"Failed to start MCP server '{config.name}': {e}"
                 logger.error("mcp_server_start_failed", server=config.name, error=str(e))
-                errors.append(msg)
+                errors.append((config.name, msg))
         return errors
 
     async def stop(self) -> None:

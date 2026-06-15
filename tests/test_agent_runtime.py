@@ -1,4 +1,5 @@
 import asyncio
+import os
 import socket
 import struct
 
@@ -6,14 +7,18 @@ import pytest
 
 from switchplane.agent_runtime import (
     AgentContext,
+    _agent_resources,
+    _execute_task,
     _import_task_class,
+    _instantiate_task,
     _listen_for_commands,
     _read_message,
     _start_checkpointer,
     _start_mcp,
     _stop_checkpointer,
-    _stop_mcp,
+    _unwrap_cause,
     _write_message_sync,
+    agent_main,
 )
 from switchplane.protocol import AgentCommand, AgentEvent
 
@@ -553,32 +558,548 @@ class TestWaitForInput:
         mock_task._dispatch_command.assert_awaited_once_with(ctx, other_cmd)
 
 
+class _FakeManager:
+    """Stand-in for McpManager: start() returns canned (name, message) error
+    tuples and records whether the started sessions were torn down."""
+
+    def __init__(self, configs, runtime_dir=None):
+        self.configs = configs
+        self.stopped = False
+
+    def set_errors(self, errors):
+        self._errors = errors
+        return self
+
+    async def start(self):
+        return getattr(self, "_errors", [])
+
+    async def stop(self):
+        self.stopped = True
+
+
 class TestStartStopMcp:
-    @pytest.mark.asyncio
-    async def test_start_empty_configs(self):
+    @pytest.fixture
+    def _ctx(self):
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(
-            task_id="t1",
-            task_name="test",
-            ipc_sock=agent_sock,
-            config={},
-        )
-        await _start_mcp(ctx, [])
-        assert ctx._mcp is None  # internal state stays None
-        assert ctx.mcp == {}  # property returns empty dict for safe .get() access
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
+        yield ctx
         agent_sock.close()
 
     @pytest.mark.asyncio
-    async def test_stop_without_start(self):
+    async def test_start_empty_configs(self, _ctx):
+        await _start_mcp(_ctx, [])
+        assert _ctx._mcp is None  # internal state stays None
+        assert _ctx.mcp == {}  # property returns empty dict for safe .get() access
+
+    @pytest.mark.asyncio
+    async def test_required_server_failure_aborts(self, _ctx, monkeypatch):
+        import switchplane.mcp as mcp_mod
+
+        captured = {}
+
+        def _factory(configs, runtime_dir=None):
+            mgr = _FakeManager(configs).set_errors([("dead", "Failed to start MCP server 'dead': boom")])
+            captured["mgr"] = mgr
+            return mgr
+
+        monkeypatch.setattr(mcp_mod, "McpManager", _factory)
+
+        with pytest.raises(RuntimeError, match="failed to start \\(dead\\)"):
+            await _start_mcp(_ctx, [{"name": "dead", "url": "http://x/"}])
+        assert captured["mgr"].stopped is True  # torn down on abort
+        assert _ctx._mcp is None
+
+    @pytest.mark.asyncio
+    async def test_optional_server_failure_is_skipped(self, _ctx, monkeypatch):
+        import switchplane.mcp as mcp_mod
+
+        captured = {}
+
+        def _factory(configs, runtime_dir=None):
+            mgr = _FakeManager(configs).set_errors([("slack", "Failed to start MCP server 'slack': 429")])
+            captured["mgr"] = mgr
+            return mgr
+
+        monkeypatch.setattr(mcp_mod, "McpManager", _factory)
+
+        # An optional server's startup failure must not abort the task.
+        await _start_mcp(_ctx, [{"name": "slack", "url": "http://x/", "optional": True}])
+        assert captured["mgr"].stopped is False  # kept, not torn down
+        assert _ctx._mcp is captured["mgr"]
+
+    @pytest.mark.asyncio
+    async def test_required_failure_aborts_even_with_optional_failure(self, _ctx, monkeypatch):
+        import switchplane.mcp as mcp_mod
+
+        captured = {}
+
+        def _factory(configs, runtime_dir=None):
+            mgr = _FakeManager(configs).set_errors([
+                ("slack", "Failed to start MCP server 'slack': 429"),
+                ("dxmcp", "Failed to start MCP server 'dxmcp': auth"),
+            ])
+            captured["mgr"] = mgr
+            return mgr
+
+        monkeypatch.setattr(mcp_mod, "McpManager", _factory)
+
+        with pytest.raises(RuntimeError) as ei:
+            await _start_mcp(_ctx, [
+                {"name": "slack", "url": "http://x/", "optional": True},
+                {"name": "dxmcp", "url": "http://y/"},
+            ])
+        # Only the required server is named in the abort message.
+        assert "dxmcp" in str(ei.value)
+        assert "slack" not in str(ei.value)
+        assert captured["mgr"].stopped is True
+
+class TestUnwrapCause:
+    """`_unwrap_cause` recovers the real leaf from masked/wrapped errors."""
+
+    def test_plain_exception_returned_as_is(self):
+        err = ValueError("boom")
+        assert _unwrap_cause(err) is err
+
+    def test_bare_cancelled_returns_none(self):
+        assert _unwrap_cause(asyncio.CancelledError()) is None
+
+    def test_group_with_real_leaf_returns_leaf(self):
+        leaf = RuntimeError("real cause")
+        group = BaseExceptionGroup("wrapped", [asyncio.CancelledError(), leaf])
+        assert _unwrap_cause(group) is leaf
+
+    def test_group_of_only_cancellations_returns_none(self):
+        group = BaseExceptionGroup("cancels", [asyncio.CancelledError(), asyncio.CancelledError()])
+        assert _unwrap_cause(group) is None
+
+    def test_nested_group_recurses_to_leaf(self):
+        leaf = OSError("deep")
+        inner = BaseExceptionGroup("inner", [asyncio.CancelledError(), leaf])
+        outer = BaseExceptionGroup("outer", [asyncio.CancelledError(), inner])
+        assert _unwrap_cause(outer) is leaf
+
+
+class TestAgentResources:
+    """`_agent_resources` owns the resource lifecycle inside the task scope.
+
+    The defining behaviour of fix A: teardown propagates, so a fault trapped in
+    a resource's async scope (the MCP transport task group) surfaces to the
+    reporting boundary instead of being masked as a bare CancelledError.
+    """
+
+    @pytest.mark.asyncio
+    async def test_teardown_propagates_trapped_cause(self):
+        """A BaseExceptionGroup raised by mcp stop() escapes the context (not swallowed)."""
         _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        ctx = AgentContext(
-            task_id="t1",
-            task_name="test",
-            ipc_sock=agent_sock,
-            config={},
-        )
-        await _stop_mcp(ctx)  # should not raise
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
+
+        leaf = RuntimeError("429 from transport")
+
+        class _FaultedMgr:
+            async def stop(self):
+                raise BaseExceptionGroup("transport", [asyncio.CancelledError(), leaf])
+
+        # _start_mcp([]) leaves _mcp None; simulate a started manager directly.
+        with pytest.raises(BaseExceptionGroup) as ei:
+            async with _agent_resources(ctx, []):
+                ctx._mcp = _FaultedMgr()
+        assert _unwrap_cause(ei.value) is leaf
+        assert ctx._mcp is None  # cleared even though teardown raised
         agent_sock.close()
+
+    @pytest.mark.asyncio
+    async def test_clean_teardown_no_error(self):
+        """With no MCP and a clean body, the context exits silently."""
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
+        async with _agent_resources(ctx, []):
+            pass
+        assert ctx._mcp is None
+        agent_sock.close()
+
+
+class TestExecuteTask:
+    """`_execute_task` emits task.started after resources are up, then runs."""
+
+    @pytest.mark.asyncio
+    async def test_emits_started_then_runs(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "exectaskpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ok.py").write_text(
+            "from switchplane.task import Task\n"
+            "class OkTask(Task):\n"
+            '    name = "ok"\n'
+            "    async def run(self, ctx):\n"
+            '        ctx.complete({"status": "done"})\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="ok", ipc_sock=agent_sock, config={})
+        task_class = _import_task_class("exectaskpkg.ok")
+        instance = _instantiate_task(ctx, task_class, {})
+
+        await _execute_task(ctx, instance, [])
+
+        types = []
+        cp_sock.setblocking(False)
+        while True:
+            try:
+                types.append(AgentEvent.model_validate_json(_recv_message(cp_sock)).type)
+            except (BlockingIOError, ConnectionError):
+                break
+        assert types[0] == "task.started"
+        assert "task.completed" in types
+        agent_sock.close()
+        cp_sock.close()
+
+    @pytest.mark.asyncio
+    async def test_wrapped_cause_propagates_to_boundary(self, tmp_path, monkeypatch):
+        """A task whose body raises inside a TaskGroup surfaces the real leaf.
+
+        This is the masking case made non-MCP: the BaseExceptionGroup must
+        escape _execute_task so agent_main's boundary can unwrap it.
+        """
+        pkg = tmp_path / "wrappedpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "boom.py").write_text(
+            "import asyncio\n"
+            "from switchplane.task import Task\n"
+            "class BoomTask(Task):\n"
+            '    name = "boom"\n'
+            "    async def run(self, ctx):\n"
+            "        async with asyncio.TaskGroup() as tg:\n"
+            "            tg.create_task(self._fault())\n"
+            "    async def _fault(self):\n"
+            '        raise ValueError("boom")\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="boom", ipc_sock=agent_sock, config={})
+        task_class = _import_task_class("wrappedpkg.boom")
+        instance = _instantiate_task(ctx, task_class, {})
+
+        with pytest.raises(BaseExceptionGroup) as ei:
+            await _execute_task(ctx, instance, [])
+        assert isinstance(_unwrap_cause(ei.value), ValueError)
+        agent_sock.close()
+
+
+class TestAgentMainBoundary:
+    """End-to-end: drive the real `agent_main` entry point over an IPC fd and
+    assert the terminal event it reports. This is the integration the masking
+    fix rests on — that an exception raised during execution reaches
+    `agent_main`'s reporting boundary and is reported with the real cause.
+    """
+
+    async def _drive(
+        self,
+        task_module: str,
+        params: dict | None = None,
+        mcp_servers: list | None = None,
+    ) -> list[AgentEvent]:
+        """Run agent_main against a task module, return all events it emitted."""
+        cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        # agent_main does socket.fromfd then os.close(fd); hand it a dup so our
+        # agent_sock stays valid for cleanup. Own the dup in a finally so the
+        # fd never leaks even if agent_main returns before its own os.close.
+        ipc_fd = os.dup(agent_sock.fileno())
+        closed_by_agent_main = False
+        try:
+            command = AgentCommand(
+                type="execute_task",
+                task_id="t1",
+                payload={
+                    "task_name": "x",
+                    "params": params or {},
+                    "task_module": task_module,
+                    "config": {},
+                    "mcp_servers": mcp_servers or [],
+                    "db_path": None,
+                    "log_level": "debug",
+                },
+            )
+            # Send the initial command from the CP side before agent_main reads.
+            _write_message_sync(cp_sock, command.model_dump_json().encode())
+
+            await agent_main(ipc_fd, entry_point="test")
+            closed_by_agent_main = True  # agent_main reached its own os.close(ipc_fd)
+
+            events = []
+            cp_sock.setblocking(False)
+            while True:
+                try:
+                    events.append(AgentEvent.model_validate_json(_recv_message(cp_sock)))
+                except (BlockingIOError, ConnectionError):
+                    break
+            return events
+        finally:
+            if not closed_by_agent_main:
+                try:
+                    os.close(ipc_fd)
+                except OSError:
+                    pass
+            agent_sock.close()
+            cp_sock.close()
+
+    @pytest.mark.asyncio
+    async def test_clean_task_completes(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "ampkg_ok"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ok.py").write_text(
+            "from switchplane.task import Task\n"
+            "class OkTask(Task):\n"
+            '    name = "ok"\n'
+            "    async def run(self, ctx):\n"
+            '        ctx.complete({"v": 1})\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        events = await self._drive("ampkg_ok.ok")
+        types = [e.type for e in events]
+        assert types[0] == "task.started"
+        assert "task.completed" in types
+        assert "task.failed" not in types
+
+    @pytest.mark.asyncio
+    async def test_wrapped_cause_reported_with_real_leaf(self, tmp_path, monkeypatch):
+        """A TaskGroup fault must be reported as the real leaf, not ExceptionGroup
+        and not 'CancelledError raised internally'."""
+        pkg = tmp_path / "ampkg_boom"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "boom.py").write_text(
+            "import asyncio\n"
+            "from switchplane.task import Task\n"
+            "class BoomTask(Task):\n"
+            '    name = "boom"\n'
+            "    async def run(self, ctx):\n"
+            "        async with asyncio.TaskGroup() as tg:\n"
+            "            tg.create_task(self._fault())\n"
+            "    async def _fault(self):\n"
+            '        raise ValueError("kaboom")\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        events = await self._drive("ampkg_boom.boom")
+        failed = [e for e in events if e.type == "task.failed"]
+        assert len(failed) == 1
+        assert failed[0].payload["error"] == "ValueError: kaboom"
+        assert "ExceptionGroup" not in failed[0].payload["error"]
+        assert "CancelledError raised internally" not in failed[0].payload["error"]
+
+    @pytest.mark.asyncio
+    async def test_plain_exception_reported(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "ampkg_raise"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "r.py").write_text(
+            "from switchplane.task import Task\n"
+            "class RaiseTask(Task):\n"
+            '    name = "r"\n'
+            "    async def run(self, ctx):\n"
+            '        raise RuntimeError("nope")\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        events = await self._drive("ampkg_raise.r")
+        failed = [e for e in events if e.type == "task.failed"]
+        assert len(failed) == 1
+        assert failed[0].payload["error"] == "RuntimeError: nope"
+
+    @pytest.mark.asyncio
+    async def test_operator_cancel_reports_cancelled(self, tmp_path, monkeypatch):
+        """A cancel command mid-execution yields task.cancelled, not a failure.
+
+        Drives agent_main directly (not via _drive) because it must send a
+        second command — `cancel` — while the task is running.
+        """
+        pkg = tmp_path / "ampkg_cancel"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "loop.py").write_text(
+            "from switchplane.task import Task\n"
+            "class LoopTask(Task):\n"
+            '    name = "loop"\n'
+            "    async def run(self, ctx):\n"
+            "        while True:\n"
+            "            await ctx.sleep(60)\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ipc_fd = os.dup(agent_sock.fileno())
+        try:
+            execute = AgentCommand(
+                type="execute_task",
+                task_id="t1",
+                payload={
+                    "task_name": "loop",
+                    "params": {},
+                    "task_module": "ampkg_cancel.loop",
+                    "config": {},
+                    "mcp_servers": [],
+                    "db_path": None,
+                    "log_level": "debug",
+                },
+            )
+            _write_message_sync(cp_sock, execute.model_dump_json().encode())
+
+            main_task = asyncio.create_task(agent_main(ipc_fd, entry_point="test"))
+            await asyncio.sleep(0.05)  # let the task start and enter its loop
+            cancel = AgentCommand(type="cancel", task_id="t1")
+            _write_message_sync(cp_sock, cancel.model_dump_json().encode())
+            await asyncio.wait_for(main_task, timeout=5)
+
+            events = []
+            cp_sock.setblocking(False)
+            while True:
+                try:
+                    events.append(AgentEvent.model_validate_json(_recv_message(cp_sock)))
+                except (BlockingIOError, ConnectionError):
+                    break
+            types = [e.type for e in events]
+            assert "task.cancelled" in types
+            assert "task.failed" not in types
+        finally:
+            agent_sock.close()
+            cp_sock.close()
+
+    @pytest.mark.asyncio
+    async def test_operator_cancel_wins_over_teardown_fault(self, tmp_path, monkeypatch):
+        """Operator cancel is authoritative even if resource teardown raises.
+
+        When a cancel coincides with a trapped fault that surfaces on teardown
+        (the group *replaces* the in-flight CancelledError), classification must
+        still key off the durable cancel signals and report task.cancelled —
+        not task.failed.
+        """
+        pkg = tmp_path / "ampkg_cxl_fault"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        # The task installs a manager on ctx._mcp whose stop() raises a group,
+        # mimicking a transport fault that only surfaces on teardown, then loops
+        # until cancelled.
+        (pkg / "loopfault.py").write_text(
+            "import asyncio\n"
+            "from switchplane.task import Task\n"
+            "class _FaultMgr:\n"
+            "    async def stop(self):\n"
+            '        raise BaseExceptionGroup("t", [asyncio.CancelledError(), RuntimeError("429")])\n'
+            "class LoopFaultTask(Task):\n"
+            '    name = "loopfault"\n'
+            "    async def run(self, ctx):\n"
+            "        ctx._mcp = _FaultMgr()\n"
+            "        while True:\n"
+            "            await ctx.sleep(60)\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cp_sock, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ipc_fd = os.dup(agent_sock.fileno())
+        try:
+            execute = AgentCommand(
+                type="execute_task",
+                task_id="t1",
+                payload={
+                    "task_name": "loopfault",
+                    "params": {},
+                    "task_module": "ampkg_cxl_fault.loopfault",
+                    "config": {},
+                    "mcp_servers": [],
+                    "db_path": None,
+                    "log_level": "debug",
+                },
+            )
+            _write_message_sync(cp_sock, execute.model_dump_json().encode())
+            main_task = asyncio.create_task(agent_main(ipc_fd, entry_point="test"))
+            await asyncio.sleep(0.05)
+            _write_message_sync(cp_sock, AgentCommand(type="cancel", task_id="t1").model_dump_json().encode())
+            await asyncio.wait_for(main_task, timeout=5)
+
+            events = []
+            cp_sock.setblocking(False)
+            while True:
+                try:
+                    events.append(AgentEvent.model_validate_json(_recv_message(cp_sock)))
+                except (BlockingIOError, ConnectionError):
+                    break
+            types = [e.type for e in events]
+            assert "task.cancelled" in types
+            assert "task.failed" not in types
+        finally:
+            agent_sock.close()
+            cp_sock.close()
+
+    @pytest.mark.asyncio
+    async def test_teardown_fault_does_not_overwrite_completed(self, tmp_path, monkeypatch):
+        """A teardown fault on the success path must not emit a second terminal
+        event. The task completes, then resource teardown raises a group; the
+        boundary must log it and leave the single task.completed standing —
+        otherwise the control plane records the task as FAILED.
+        """
+        pkg = tmp_path / "ampkg_done_fault"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        # Task completes successfully, then its installed manager raises on stop.
+        (pkg / "donefault.py").write_text(
+            "import asyncio\n"
+            "from switchplane.task import Task\n"
+            "class _FaultMgr:\n"
+            "    async def stop(self):\n"
+            '        raise BaseExceptionGroup("t", [asyncio.CancelledError(), RuntimeError("429")])\n'
+            "class DoneFaultTask(Task):\n"
+            '    name = "donefault"\n'
+            "    async def run(self, ctx):\n"
+            "        ctx._mcp = _FaultMgr()\n"
+            '        ctx.complete({"v": 1})\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        events = await self._drive("ampkg_done_fault.donefault")
+        types = [e.type for e in events]
+        assert types.count("task.completed") == 1
+        assert "task.failed" not in types
+
+    @pytest.mark.asyncio
+    async def test_mcp_startup_failure_reported_before_started(self, tmp_path, monkeypatch):
+        """An unreachable MCP server fails the task before task.started.
+
+        Locks the prior contract: resource-startup failure surfaces as
+        task.failed with no preceding task.started.
+        """
+        pkg = tmp_path / "ampkg_mcp"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "needs_mcp.py").write_text(
+            "from typing import ClassVar\n"
+            "from switchplane.task import Task\n"
+            "class NeedsMcp(Task):\n"
+            '    name = "needs_mcp"\n'
+            '    mcp_servers: ClassVar[list[str]] = ["dead"]\n'
+            "    async def run(self, ctx):\n"
+            '        ctx.complete({"unreachable": True})\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        # Force _start_mcp to fail as if the server were unreachable.
+        import switchplane.agent_runtime as ar
+
+        async def _boom_start_mcp(ctx, configs):
+            if configs:
+                raise RuntimeError("MCP server(s) failed to start (dead): unreachable")
+
+        monkeypatch.setattr(ar, "_start_mcp", _boom_start_mcp)
+
+        events = await self._drive(
+            "ampkg_mcp.needs_mcp",
+            mcp_servers=[{"name": "dead", "url": "http://127.0.0.1:0/"}],
+        )
+        types = [e.type for e in events]
+        assert "task.started" not in types
+        failed = [e for e in events if e.type == "task.failed"]
+        assert len(failed) == 1
+        assert "failed to start" in failed[0].payload["error"]
 
 
 class TestTaskMcpServerFiltering:

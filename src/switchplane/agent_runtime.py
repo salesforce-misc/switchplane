@@ -28,6 +28,7 @@ import os
 import socket
 import struct
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -657,8 +658,12 @@ async def _stop_checkpointer(ctx: AgentContext) -> None:
 async def _start_mcp(ctx: AgentContext, mcp_configs: list[dict[str, Any]]) -> None:
     """Start MCP sessions if configured.
 
-    Raises ``RuntimeError`` if all configured servers fail to start so
-    the caller can abort the task before execution begins.
+    Raises ``RuntimeError`` if a *required* server fails to start so the caller
+    can abort the task before execution begins. A server marked ``optional`` is
+    logged and skipped instead — the rest of the task runs with that session
+    simply absent from ``ctx.mcp`` (tasks must guard their lookups and degrade
+    gracefully). When every started server is optional, the manager keeps the
+    sessions that did come up.
     """
     if not mcp_configs:
         return
@@ -675,33 +680,88 @@ async def _start_mcp(ctx: AgentContext, mcp_configs: list[dict[str, Any]]) -> No
     runtime_dir = Path(ctx._db_path).parent if ctx._db_path else None
     manager = McpManager(configs, runtime_dir=runtime_dir)
     errors = await manager.start()
-    for err in errors:
-        _logger.error("mcp_server_start_failed", error=err)
 
-    if errors:
+    # `errors` is a list of (server_name, message). The name is authoritative —
+    # no string parsing — so an optional server's failure can't be confused with
+    # a required one, even if an error body happens to mention another server.
+    optional_by_name = {c.name: c.optional for c in configs}
+    required_errors: list[tuple[str, str]] = []
+    for name, msg in errors:
+        if optional_by_name.get(name, False):
+            _logger.warning("mcp_optional_server_start_failed", server=name, error=msg)
+        else:
+            _logger.error("mcp_server_start_failed", server=name, error=msg)
+            required_errors.append((name, msg))
+
+    if required_errors:
+        # A required server is down: tear down everything (including any optional
+        # sessions that did start) and abort.
         await manager.stop()
-        failed_names = []
-        for err in errors:
-            for c in configs:
-                if c.name in err:
-                    failed_names.append(c.name)
-                    break
-        names = ", ".join(failed_names) if failed_names else "unknown"
+        names = ", ".join(name for name, _ in required_errors)
+        detail = "; ".join(msg for _, msg in required_errors)
         raise RuntimeError(
-            f"MCP server(s) failed to start ({names}): {'; '.join(errors)}. "
+            f"MCP server(s) failed to start ({names}): {detail}. "
             f"Check authentication with 'auth login' for the failed server(s)."
         )
 
     ctx._mcp = manager
 
 
-async def _stop_mcp(ctx: AgentContext) -> None:
-    """Stop MCP sessions if running."""
-    if ctx._mcp is not None:
+def _unwrap_cause(exc: BaseException) -> BaseException | None:
+    """Return the most specific non-cancellation leaf of *exc*, or ``None``.
+
+    Structured concurrency (asyncio ``TaskGroup``, anyio task groups, the MCP
+    transport, LangGraph parallel nodes) wraps faults in a
+    ``BaseExceptionGroup`` and uses ``CancelledError`` to cancel siblings of a
+    faulting child. Both obscure the real cause. Recurse into groups, skip
+    ``CancelledError`` leaves (they are the masking artifact, never the cause),
+    and return the first real exception. Returns ``None`` when the only leaves
+    are cancellations — i.e. there is genuinely nothing to report but the
+    cancellation itself.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            found = _unwrap_cause(sub)
+            if found is not None:
+                return found
+        return None
+    if isinstance(exc, asyncio.CancelledError):
+        return None
+    return exc
+
+
+@asynccontextmanager
+async def _agent_resources(ctx: AgentContext, mcp_configs: list[dict[str, Any]]):
+    """Own the agent's resource lifecycle *inside the task that uses them*.
+
+    Structured concurrency binds a scope to the task that entered it: the MCP
+    streamable-HTTP transport opens an anyio task group on ``start()`` that may
+    only be closed by the same task. By entering this context inside
+    ``task_handle`` (where the graph — and therefore every tool call — runs), a
+    faulting request's real exception surfaces *here*, chained over the
+    ``CancelledError``, as a ``BaseExceptionGroup`` that propagates normally to
+    the reporting boundary. No out-of-band draining is needed; ``scope == task``
+    is restored and the cause is never masked.
+
+    Teardown deliberately does **not** swallow exceptions — that propagation is
+    the mechanism that surfaces a trapped transport fault. The checkpointer
+    connection has no task group, so its teardown is best-effort (it cannot trap
+    a cause) and stays inside ``_stop_checkpointer``.
+
+    Any future long-lived resource should be added here so it inherits the same
+    correct error surfacing for free.
+    """
+    await _start_checkpointer(ctx)
+    try:
+        await _start_mcp(ctx, mcp_configs)
         try:
-            await ctx._mcp.stop()
-        except Exception:
-            pass
+            yield
+        finally:
+            if ctx._mcp is not None:
+                mgr, ctx._mcp = ctx._mcp, None
+                await mgr.stop()  # propagates: a trapped transport fault surfaces here
+    finally:
+        await _stop_checkpointer(ctx)
 
 
 def _import_task_class(task_module_path: str) -> type:
@@ -730,11 +790,12 @@ def _import_task_class(task_module_path: str) -> type:
 def _instantiate_task(ctx: AgentContext, task_class: type, raw_params: dict):
     """Construct a Task subclass and bind validated parameter fields.
 
-    Split from `_run_task` so callers (specifically `agent_main`) can
-    reach into the populated instance for `startup_info()` *before*
-    `task.started` is emitted. Without this, the emit would have to
-    fire either pre-binding (no access to params) or post-`run()`
-    (defeats the lifecycle signal).
+    Split from `_run_task` so the instance can be populated *before*
+    `_execute_task` calls `startup_info()` and emits `task.started`.
+    Without this, the emit would have to fire either pre-binding (no
+    access to params) or post-`run()` (defeats the lifecycle signal).
+    `agent_main` instantiates here so a parameter-validation failure is
+    reported before any resources start.
     """
     task_instance = task_class()
     task_instance._ctx = ctx
@@ -750,15 +811,37 @@ def _instantiate_task(ctx: AgentContext, task_class: type, raw_params: dict):
 
 async def _run_task(ctx: AgentContext, task_instance) -> None:
     """Execute a previously-instantiated Task."""
-    try:
-        result = await task_instance.run(ctx)
-        # Only auto-complete if the task returned a value AND hasn't already
-        # emitted a terminal event (complete/fail) itself.
-        if result is not None and not ctx._completed:
-            ctx.complete(result)
-    except Exception:
-        # Re-raise to be caught by agent_main which will include traceback
-        raise
+    result = await task_instance.run(ctx)
+    # Only auto-complete if the task returned a value AND hasn't already
+    # emitted a terminal event (complete/fail) itself.
+    if result is not None and not ctx._completed:
+        ctx.complete(result)
+
+
+async def _execute_task(ctx: AgentContext, task_instance, mcp_configs: list[dict[str, Any]]) -> None:
+    """The coroutine run as ``task_handle``: own resources, then run the task.
+
+    Resources are entered *here* so their scope is bound to this task — see
+    ``_agent_resources``. ``task.started`` is emitted only after resources are
+    up, so a failure starting them (e.g. an unreachable MCP server) surfaces as
+    a failure *before* ``task.started``, matching the prior contract. A masked
+    transport fault during ``run`` surfaces on resource teardown as a
+    ``BaseExceptionGroup`` that propagates to ``agent_main``'s reporting
+    boundary — no draining required. Teardown can also raise *after* the task
+    has already emitted its terminal event (the success path); in that case the
+    boundary logs the fault rather than overwriting the outcome.
+    """
+    async with _agent_resources(ctx, mcp_configs):
+        try:
+            startup_info = task_instance.startup_info() or {}
+        except Exception:
+            # `startup_info` is best-effort metadata; never block startup.
+            startup_info = {}
+        ctx.emit("task.started", startup_info)
+
+        _wait_for_debugger(ctx)
+
+        await _run_task(ctx, task_instance)
 
 
 async def agent_main(ipc_fd: int, entry_point: str) -> None:
@@ -833,72 +916,76 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
     else:
         mcp_configs = []
 
-    # Start checkpointer and MCP sessions before task execution
-    await _start_checkpointer(ctx)
-    try:
-        await _start_mcp(ctx, mcp_configs)
-    except RuntimeError as e:
-        ctx.fail(str(e))
-        await _stop_checkpointer(ctx)
-        _writer.close()
-        sock.close()
-        return
-
-    # Instantiate and bind parameters BEFORE emitting `task.started`,
-    # so `startup_info()` can surface task-specific metadata (resolved
-    # model, input identifiers, etc.) on the lifecycle event for
-    # post-hoc inspection. A failure here surfaces as `task.failed` —
-    # nothing else has run yet.
+    # Instantiate and bind parameters BEFORE `task.started`, so
+    # `startup_info()` (called inside `_execute_task`) can surface
+    # task-specific metadata on the lifecycle event. A failure here surfaces
+    # as `task.failed` — nothing else has run yet.
     try:
         task_instance = _instantiate_task(ctx, task_class, params)
     except Exception as e:
         ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
-        await _stop_mcp(ctx)
-        await _stop_checkpointer(ctx)
         _writer.close()
         sock.close()
         return
 
-    try:
-        startup_info = task_instance.startup_info() or {}
-    except Exception:
-        # `startup_info` is best-effort metadata; never block startup.
-        startup_info = {}
-    ctx.emit("task.started", startup_info)
-
-    _wait_for_debugger(ctx)
-
-    # Run the task and the command listener concurrently
-    task_handle = asyncio.create_task(_run_task(ctx, task_instance))
+    # Run the task and the command listener concurrently. Resources (MCP,
+    # checkpointer) are owned *inside* `_execute_task` so their async scopes
+    # are bound to this task — see `_agent_resources`. That is what lets a
+    # faulting MCP request surface its real cause here instead of a masked
+    # `CancelledError`.
+    task_handle = asyncio.create_task(_execute_task(ctx, task_instance, mcp_configs))
     listener_handle = asyncio.create_task(_listen_for_commands(reader, ctx, task_handle))
 
     try:
         await task_handle
-    except asyncio.CancelledError:
-        # `_cancelled` is set only by `_listen_for_commands` on receipt
-        # of a `cancel`/`shutdown` from the control plane. A
-        # CancelledError reaching here without that flag came from
-        # *inside* the task body — a leaked `wait_for` cancel, a
-        # cancelled child task awaited up the stack, an aborted
-        # `gather`, or similar. Surfacing those as a bare
-        # `task.cancelled` looks identical to an operator cancel and
-        # erases every clue about what actually went wrong; treat them
-        # as failures with the captured traceback.
-        if ctx._cancelled.is_set():
+    except (KeyboardInterrupt, SystemExit) as e:
+        # Process-level signals are never task outcomes — report and re-raise
+        # so the interpreter still tears down. Don't overwrite a terminal event
+        # the task already emitted (see the `ctx._completed` guard below).
+        if not ctx._completed:
+            ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
+        raise
+    except BaseException as e:
+        # If the task already reported its own terminal outcome (complete or
+        # fail), a fault raised *after* that — e.g. resource teardown in
+        # `_agent_resources` surfacing a trapped transport fault as a
+        # `BaseExceptionGroup` on the success path — must NOT emit a second
+        # terminal event. The control plane processes terminal events
+        # unconditionally, so a stray `task.failed` here would overwrite a
+        # recorded `task.completed`. Log the teardown fault and move on.
+        if ctx._completed:
+            if (leaf := _unwrap_cause(e)) is not None:
+                _logger.warning(
+                    "resource_teardown_failed_after_terminal",
+                    error=f"{type(leaf).__name__}: {leaf}",
+                )
+        # Classify on the durable cancel signals *first*, independent of the
+        # exception's shape. A genuine operator cancel sets `ctx._cancelled`
+        # AND delivers a `.cancel()` to this task — `_listen_for_commands`
+        # does both in the same branch — and `cancelling()` stays > 0 through
+        # teardown (only `uncancel()` decrements it, which we never call). So
+        # an operator cancel is authoritative even when resource teardown
+        # raises a `BaseExceptionGroup` that *replaces* the in-flight
+        # `CancelledError` and lands us here rather than as a bare cancel.
+        elif ctx._cancelled.is_set() and task_handle.cancelling() > 0:
             ctx.emit("task.cancelled", {})
+        elif (leaf := _unwrap_cause(e)) is not None:
+            # A real fault during execution. Because resources are owned inside
+            # the task (`_agent_resources`), a masked transport fault surfaces
+            # on scope teardown as a `BaseExceptionGroup` chained over the
+            # `CancelledError`; unwrap to the most specific real leaf so the
+            # report names the actual failure, not the opaque group wrapper.
+            ctx.fail(f"{type(leaf).__name__}: {leaf}", traceback.format_exc())
         else:
+            # Only cancellation leaves and no operator command: the cancel
+            # leaked from a scope we can't reach (a third-party `wait_for`,
+            # say). The traceback is the best signal we have.
             ctx.fail(
                 "CancelledError raised internally (no cancel command received)",
                 traceback.format_exc(),
             )
-    except BaseException as e:
-        ctx.fail(f"{type(e).__name__}: {e}", traceback.format_exc())
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
     finally:
         _logging.getLogger().removeHandler(_ipc_handler)
-        await _stop_mcp(ctx)
-        await _stop_checkpointer(ctx)
         listener_handle.cancel()
         try:
             await listener_handle
