@@ -188,6 +188,46 @@ class TestAputWrites:
         assert len(result.pending_writes) == 2
 
 
+class TestDeleteThread:
+    @pytest.mark.asyncio
+    async def test_deletes_checkpoints_writes_and_mapping(self, db):
+        # A saver bound to a task records the thread->task mapping on aput.
+        saver = SqliteCheckpointSaver(db, task_id="task1")
+        await saver.aput(_config(), _checkpoint("cp1"), {"step": 1}, {})
+        await saver.aput(_config(checkpoint_id="cp1"), _checkpoint("cp2"), {"step": 2}, {})
+        await saver.aput_writes(_config(checkpoint_id="cp2"), [("messages", ["x"])], task_id="task1")
+
+        # Sanity: all three tables have rows for this thread before delete.
+        for table in ("checkpoints", "checkpoint_writes", "checkpoint_threads"):
+            cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE thread_id = ?", ("thread1",))
+            assert (await cur.fetchone())[0] > 0, table
+
+        await saver.adelete_thread("thread1")
+
+        for table in ("checkpoints", "checkpoint_writes", "checkpoint_threads"):
+            cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE thread_id = ?", ("thread1",))
+            assert (await cur.fetchone())[0] == 0, table
+
+        # The latest-checkpoint lookup now finds nothing — the next invoke
+        # on this thread starts fresh.
+        assert await saver.aget_tuple(_config()) is None
+
+    @pytest.mark.asyncio
+    async def test_only_targets_named_thread(self, saver):
+        await saver.aput(_config(thread_id="keep"), _checkpoint("cp1"), {}, {})
+        await saver.aput(_config(thread_id="drop"), _checkpoint("cp1"), {}, {})
+
+        await saver.adelete_thread("drop")
+
+        assert await saver.aget_tuple(_config(thread_id="drop")) is None
+        assert await saver.aget_tuple(_config(thread_id="keep")) is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_missing_thread_is_noop(self, saver):
+        # No rows for this thread; must not raise.
+        await saver.adelete_thread("never-existed")
+
+
 class TestSyncMethodsRaise:
     def test_get_tuple(self, saver):
         with pytest.raises(NotImplementedError, match="async"):
@@ -204,6 +244,10 @@ class TestSyncMethodsRaise:
     def test_put_writes(self, saver):
         with pytest.raises(NotImplementedError, match="async"):
             saver.put_writes(_config(), [], "task1")
+
+    def test_delete_thread(self, saver):
+        with pytest.raises(NotImplementedError, match="async"):
+            saver.delete_thread("thread1")
 
     @pytest_asyncio.fixture
     async def saver(self, tmp_path):
