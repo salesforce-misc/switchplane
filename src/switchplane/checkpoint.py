@@ -351,6 +351,26 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
 
         await self.db.commit()
 
+    async def adelete_thread(self, thread_id: str) -> None:
+        """Delete every checkpoint, pending write, and thread mapping for
+        ``thread_id``.
+
+        Overrides ``BaseCheckpointSaver.adelete_thread`` (which raises
+        ``NotImplementedError``). LangGraph keys all checkpoint state on
+        ``thread_id``, so callers that reuse a thread id across runs (e.g. a
+        task whose thread is its work item) use this to guarantee a clean
+        slate before a fresh invoke. Mirrors the per-thread deletes in
+        ``Store.purge_terminal_tasks`` — same three tables, same key — but
+        scoped to a single thread and without touching the ``tasks`` row.
+
+        Drops the ``checkpoint_threads`` mapping too, so a later orphan sweep
+        in purge doesn't resurrect this thread as dangling data.
+        """
+        await self.db.execute("DELETE FROM checkpoint_writes WHERE thread_id = ?", (thread_id,))
+        await self.db.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+        await self.db.execute("DELETE FROM checkpoint_threads WHERE thread_id = ?", (thread_id,))
+        await self.db.commit()
+
     # Sync methods - not implemented
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
@@ -387,3 +407,7 @@ class SqliteCheckpointSaver(BaseCheckpointSaver):
     ) -> None:
         """Sync version not implemented - use async version."""
         raise NotImplementedError("Use async version: aput_writes")
+
+    def delete_thread(self, thread_id: str) -> None:
+        """Sync version not implemented - use async version."""
+        raise NotImplementedError("Use async version: adelete_thread")

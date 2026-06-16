@@ -68,6 +68,16 @@ class McpServerConfig(BaseModel):
     oauth: OAuthConfig | None = None
     oauth_group: str | None = None
     timeout: float | None = 30.0
+    # Number of times to retry HTTP 429 (rate-limited) responses before giving
+    # up, with exponential backoff honoring Retry-After. 0 disables retrying.
+    # Only applies to HTTP servers whose client Switchplane builds (OAuth).
+    max_retries: int = 3
+    # When True, a failure to start this server is logged and skipped rather
+    # than aborting the whole task. The session is simply absent from
+    # ``ctx.mcp``; tasks must guard their lookups (``ctx.mcp.get(name)``) and
+    # degrade gracefully. Use for non-essential enrichment sources (e.g. a
+    # rate-limit-prone Slack) where the task is still useful without them.
+    optional: bool = False
 
     @property
     def oauth_storage_key(self) -> str:

@@ -369,6 +369,109 @@ async def run_direct_oidc_login(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Rate-limit (HTTP 429) retry transport
+# ---------------------------------------------------------------------------
+
+_RETRY_BACKOFF_BASE_SECONDS = 2.0
+_RETRY_BACKOFF_MAX_SECONDS = 60.0
+
+
+def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before the next retry.
+
+    Combines the server's ``Retry-After`` header (delta-seconds form) with a
+    capped exponential backoff keyed on the 0-based attempt number, taking the
+    *larger* of the two. This honors a server that asks for a longer cooldown,
+    while ensuring a small constant header (e.g. Slack's ``Retry-After: 1`` on
+    every 429) can't defeat escalation — without it, three retries would wait
+    1s each (~3s total) and never outlast a real throttle window. Both inputs
+    are clamped to a sane maximum.
+    """
+    backoff = _RETRY_BACKOFF_BASE_SECONDS * (2**attempt)
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            backoff = max(backoff, float(retry_after))
+        except ValueError:
+            pass  # HTTP-date form is unusual for 429; fall through to backoff
+    return min(max(0.0, backoff), _RETRY_BACKOFF_MAX_SECONDS)
+
+
+class RetryTransport(httpx.AsyncBaseTransport):
+    """Wraps an httpx transport to retry HTTP 429 responses transparently.
+
+    This sits *below* the MCP SDK's streamable-HTTP layer. The SDK runs each
+    request inside an anyio task group and calls ``response.raise_for_status()``
+    there; a 429 raised at that point escapes as a ``CancelledError`` to the
+    caller and tears down the whole session (it surfaces only at teardown).
+    Absorbing 429s here — before the SDK ever sees the status — means rate
+    limits are retried instead of fatal, for both the ``initialize`` handshake
+    and ordinary tool calls.
+
+    Only 429 responses that will be retried are drained; any other response
+    (including streaming/SSE success bodies) is returned untouched so the SDK
+    can consume it normally.
+    """
+
+    def __init__(self, wrapped: httpx.AsyncBaseTransport, max_retries: int, server_name: str):
+        self._wrapped = wrapped
+        self._max_retries = max_retries
+        self._server_name = server_name
+
+    async def __aenter__(self) -> RetryTransport:
+        await self._wrapped.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self._wrapped.__aexit__(*exc_info)
+
+    async def aclose(self) -> None:
+        await self._wrapped.aclose()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        # Retrying re-sends the same `request`; this assumes a buffered (i.e.
+        # replayable) request body, which httpx guarantees for the small JSON-RPC
+        # payloads the MCP SDK sends. A streaming/consume-once upload body would
+        # not be replayable — not a concern for MCP, but the invariant is here.
+        attempt = 0
+        while True:
+            response = await self._wrapped.handle_async_request(request)
+            if response.status_code != 429 or attempt >= self._max_retries:
+                return response
+            # We're going to retry: fully drain and close this response so the
+            # connection is released before we sleep and re-send.
+            await response.aread()
+            await response.aclose()
+            delay = _retry_after_seconds(response, attempt)
+            logger.warning(
+                "mcp_rate_limited_retrying",
+                server=self._server_name,
+                attempt=attempt + 1,
+                max_retries=self._max_retries,
+                delay_seconds=round(delay, 1),
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+
+def _build_transport(config: McpServerConfig, ssl_verify: str | bool) -> httpx.AsyncBaseTransport:
+    """Build the httpx transport for an MCP OAuth client.
+
+    Returns an ``AsyncHTTPTransport`` with TLS verification configured, wrapped
+    in ``RetryTransport`` when 429 retries are enabled. Constructed explicitly
+    and passed via the client's public ``transport=`` parameter rather than
+    mutating ``client._transport``/``_mounts`` after the fact — that kept the
+    retry wiring on httpx's private internals, which could silently break (or
+    drop TLS verification) on an httpx upgrade. ``verify`` lives on the
+    transport because that is where httpx applies it once ``transport=`` is set.
+    """
+    transport: httpx.AsyncBaseTransport = httpx.AsyncHTTPTransport(verify=ssl_verify)
+    if config.max_retries > 0:
+        transport = RetryTransport(transport, config.max_retries, config.name)
+    return transport
+
+
 async def build_oauth_http_client(
     config: McpServerConfig,
     runtime_dir: Path,
@@ -409,7 +512,7 @@ async def build_oauth_http_client(
         auth = DirectOIDCAuth(oauth, storage, ssl_verify=ssl_verify)
         return httpx.AsyncClient(
             auth=auth,
-            verify=ssl_verify,
+            transport=_build_transport(config, ssl_verify),
             timeout=httpx.Timeout(config.timeout),
             follow_redirects=True,
         )
@@ -470,7 +573,7 @@ async def build_oauth_http_client(
 
     return httpx.AsyncClient(
         auth=auth,
-        verify=ssl_verify,
+        transport=_build_transport(config, ssl_verify),
         timeout=httpx.Timeout(config.timeout),
         follow_redirects=True,
     )
