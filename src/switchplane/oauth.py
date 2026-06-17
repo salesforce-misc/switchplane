@@ -377,7 +377,7 @@ _RETRY_BACKOFF_BASE_SECONDS = 2.0
 _RETRY_BACKOFF_MAX_SECONDS = 60.0
 
 
-def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+def _retry_after_seconds(response: httpx.Response | None, attempt: int) -> float:
     """Seconds to wait before the next retry.
 
     Combines the server's ``Retry-After`` header (delta-seconds form) with a
@@ -387,9 +387,13 @@ def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
     every 429) can't defeat escalation — without it, three retries would wait
     1s each (~3s total) and never outlast a real throttle window. Both inputs
     are clamped to a sane maximum.
+
+    ``response`` is ``None`` for transport faults (timeouts, connection errors)
+    where no HTTP response was received; those fall back to pure exponential
+    backoff.
     """
     backoff = _RETRY_BACKOFF_BASE_SECONDS * (2**attempt)
-    retry_after = response.headers.get("Retry-After")
+    retry_after = response.headers.get("Retry-After") if response is not None else None
     if retry_after:
         try:
             backoff = max(backoff, float(retry_after))
@@ -399,20 +403,40 @@ def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
 
 
 class RetryTransport(httpx.AsyncBaseTransport):
-    """Wraps an httpx transport to retry HTTP 429 responses transparently.
+    """Wraps an httpx transport to retry transient failures transparently.
+
+    Retries two classes of failure, both up to ``max_retries`` times with
+    capped exponential backoff:
+
+    - **HTTP 429** (rate-limited) responses, honoring ``Retry-After``.
+    - **Transient transport faults** raised by the wrapped transport —
+      ``ReadTimeout``/``ConnectTimeout`` (a hung request that would otherwise
+      ride the full client timeout into a fatal session teardown),
+      ``ConnectError``, and ``RemoteProtocolError``.
 
     This sits *below* the MCP SDK's streamable-HTTP layer. The SDK runs each
     request inside an anyio task group and calls ``response.raise_for_status()``
-    there; a 429 raised at that point escapes as a ``CancelledError`` to the
-    caller and tears down the whole session (it surfaces only at teardown).
-    Absorbing 429s here — before the SDK ever sees the status — means rate
-    limits are retried instead of fatal, for both the ``initialize`` handshake
-    and ordinary tool calls.
+    there; a 429 — or an exception escaping the request — surfaces only at
+    session teardown as a ``CancelledError`` and tears down the whole session.
+    Absorbing both here — before the SDK ever sees them — means transient
+    failures are retried instead of fatal, for both the ``initialize``
+    handshake and ordinary tool calls.
 
     Only 429 responses that will be retried are drained; any other response
     (including streaming/SSE success bodies) is returned untouched so the SDK
-    can consume it normally.
+    can consume it normally. A transport fault raised *after* response headers
+    arrive (e.g. mid-SSE-body) escapes this layer — the request has already
+    returned — but the header-receipt hang that motivates this is caught.
     """
+
+    # Transport faults worth retrying: a transient timeout/connection drop on a
+    # replayable JSON-RPC request. Deliberately excludes things like
+    # ``httpx.ProtocolError`` on a malformed request, which won't fix on retry.
+    _RETRYABLE_EXC = (
+        httpx.TimeoutException,
+        httpx.ConnectError,
+        httpx.RemoteProtocolError,
+    )
 
     def __init__(self, wrapped: httpx.AsyncBaseTransport, max_retries: int, server_name: str):
         self._wrapped = wrapped
@@ -436,7 +460,23 @@ class RetryTransport(httpx.AsyncBaseTransport):
         # not be replayable — not a concern for MCP, but the invariant is here.
         attempt = 0
         while True:
-            response = await self._wrapped.handle_async_request(request)
+            try:
+                response = await self._wrapped.handle_async_request(request)
+            except self._RETRYABLE_EXC as exc:
+                if attempt >= self._max_retries:
+                    raise
+                delay = _retry_after_seconds(None, attempt)
+                logger.warning(
+                    "mcp_transport_retrying",
+                    server=self._server_name,
+                    attempt=attempt + 1,
+                    max_retries=self._max_retries,
+                    error=type(exc).__name__,
+                    delay_seconds=round(delay, 1),
+                )
+                await asyncio.sleep(delay)
+                attempt += 1
+                continue
             if response.status_code != 429 or attempt >= self._max_retries:
                 return response
             # We're going to retry: fully drain and close this response so the

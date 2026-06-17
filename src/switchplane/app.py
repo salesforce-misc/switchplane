@@ -68,9 +68,14 @@ class McpServerConfig(BaseModel):
     oauth: OAuthConfig | None = None
     oauth_group: str | None = None
     timeout: float | None = 30.0
-    # Number of times to retry HTTP 429 (rate-limited) responses before giving
-    # up, with exponential backoff honoring Retry-After. 0 disables retrying.
-    # Only applies to HTTP servers whose client Switchplane builds (OAuth).
+    # Number of times to retry transient failures before giving up, with capped
+    # exponential backoff. Covers both HTTP 429 (rate-limited) responses
+    # (honoring Retry-After) and transient transport faults — request timeouts,
+    # connection errors, protocol errors. When > 0, `timeout` is treated as a
+    # *per-attempt* bound and the MCP SDK's own request ceiling is left
+    # unbounded so it can't cancel a live retry sequence; when 0, retrying is
+    # disabled and `timeout` bounds the single attempt. Only applies to HTTP
+    # servers whose client Switchplane builds (OAuth).
     max_retries: int = 3
     # When True, a failure to start this server is logged and skipped rather
     # than aborting the whole task. The session is simply absent from

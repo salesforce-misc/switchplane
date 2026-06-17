@@ -147,6 +147,98 @@ async def test_retry_transport_aclose_delegates():
     assert inner.closed is True
 
 
+# -- RetryTransport: transport faults ---------------------------------------
+
+
+class _FaultTransport(httpx.AsyncBaseTransport):
+    """Replays a queued sequence of outcomes.
+
+    Each item is either an ``Exception`` instance (raised) or an int status
+    (returned as a response). Mirrors a flaky transport that times out before
+    eventually answering, and records the request bodies it saw so a test can
+    assert the request was replayed unchanged across retries.
+    """
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.request_count = 0
+        self.seen_bodies: list[bytes] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.request_count += 1
+        self.seen_bodies.append(request.content)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return httpx.Response(outcome, request=request, content=b"ok")
+
+
+def _req():
+    return httpx.Request("POST", "https://mcp.codesearch/mcp", content=b'{"jsonrpc":"2.0"}')
+
+
+async def test_retry_transport_retries_read_timeout_then_succeeds():
+    inner = _FaultTransport([httpx.ReadTimeout("hung"), httpx.ReadTimeout("hung"), 200])
+    rt = RetryTransport(inner, max_retries=3, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()) as sleep:
+        resp = await rt.handle_async_request(_req())
+    assert resp.status_code == 200
+    assert inner.request_count == 3
+    assert sleep.await_count == 2
+
+
+async def test_retry_transport_replays_body_unchanged_across_retries():
+    inner = _FaultTransport([httpx.ReadTimeout("hung"), 200])
+    rt = RetryTransport(inner, max_retries=3, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()):
+        await rt.handle_async_request(_req())
+    assert inner.seen_bodies == [b'{"jsonrpc":"2.0"}', b'{"jsonrpc":"2.0"}']
+
+
+async def test_retry_transport_reraises_timeout_after_max_retries():
+    inner = _FaultTransport([httpx.ReadTimeout("hung")] * 5)
+    rt = RetryTransport(inner, max_retries=2, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()), pytest.raises(httpx.ReadTimeout):
+        await rt.handle_async_request(_req())
+    assert inner.request_count == 3  # initial + 2 retries
+
+
+async def test_retry_transport_retries_connect_error():
+    inner = _FaultTransport([httpx.ConnectError("refused"), 200])
+    rt = RetryTransport(inner, max_retries=3, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()):
+        resp = await rt.handle_async_request(_req())
+    assert resp.status_code == 200
+    assert inner.request_count == 2
+
+
+async def test_retry_transport_does_not_retry_non_transient_exception():
+    # A bad-request protocol error won't fix on retry; it must propagate at once.
+    inner = _FaultTransport([httpx.UnsupportedProtocol("bad")])
+    rt = RetryTransport(inner, max_retries=3, server_name="codesearch")
+    with (
+        patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(httpx.UnsupportedProtocol),
+    ):
+        await rt.handle_async_request(_req())
+    assert inner.request_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_retry_transport_zero_retries_raises_on_first_timeout():
+    inner = _FaultTransport([httpx.ReadTimeout("hung"), 200])
+    rt = RetryTransport(inner, max_retries=0, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()), pytest.raises(httpx.ReadTimeout):
+        await rt.handle_async_request(_req())
+    assert inner.request_count == 1
+
+
+def test_retry_after_seconds_handles_none_response():
+    # Transport faults pass response=None -> pure exponential backoff.
+    assert _retry_after_seconds(None, attempt=0) == 2.0
+    assert _retry_after_seconds(None, attempt=1) == 4.0
+
+
 # -- _build_transport -------------------------------------------------------
 
 
