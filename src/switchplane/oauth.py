@@ -458,6 +458,16 @@ class RetryTransport(httpx.AsyncBaseTransport):
         # replayable) request body, which httpx guarantees for the small JSON-RPC
         # payloads the MCP SDK sends. A streaming/consume-once upload body would
         # not be replayable — not a concern for MCP, but the invariant is here.
+        #
+        # Semantic caveat: a 429 is safe to retry because the server rejected the
+        # request *before* processing it. A transport fault is not in the same
+        # category — a `ReadTimeout` or mid-flight `RemoteProtocolError` can occur
+        # after the server has already begun (or finished) executing the call and
+        # only the response was lost. MCP `tools/call` requests are not guaranteed
+        # idempotent, so retrying a transport fault can double-execute a
+        # state-mutating tool. We accept this: the alternative (a fatal session
+        # teardown on every transient blip) is worse for the long-running tasks
+        # this serves, and tool idempotency is the server's contract to uphold.
         attempt = 0
         while True:
             try:

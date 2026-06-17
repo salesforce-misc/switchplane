@@ -161,6 +161,14 @@ class McpSession:
         # SDK ceiling would cancel a live retry sequence mid-flight. So we leave
         # it unbounded and let the transport govern. With retries disabled, the
         # SDK ceiling mirrors the client timeout (unchanged legacy behavior).
+        #
+        # Note: ``config.timeout = None`` disables *all* bounds — both the SDK
+        # ceiling (here) and the httpx client timeout (``httpx.Timeout(None)``
+        # in ``oauth.py``) — so a hung server hangs indefinitely. This is true
+        # with or without retries (the legacy path also yields ``None`` when
+        # ``timeout is None``), and is the caller's explicit choice: pairing
+        # ``timeout=None`` with retries removes the last remaining cancellation
+        # point. Keep a finite ``timeout`` if you want retries to stay bounded.
         if self.config.max_retries > 0:
             read_timeout = None
         else:
