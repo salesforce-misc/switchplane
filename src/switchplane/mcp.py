@@ -154,7 +154,25 @@ class McpSession:
         """Call a tool on this MCP server."""
         if not self.session:
             raise RuntimeError(f"MCP session '{self.config.name}' not initialized")
-        read_timeout = datetime.timedelta(seconds=self.config.timeout) if self.config.timeout is not None else None
+        # The MCP SDK applies its own ``read_timeout_seconds`` *around* the
+        # whole request, independently of the httpx client timeout. When retries
+        # are enabled (``max_retries > 0``), the RetryTransport — using the
+        # per-attempt ``config.timeout`` — is the sole timeout authority: a fixed
+        # SDK ceiling would cancel a live retry sequence mid-flight. So we leave
+        # it unbounded and let the transport govern. With retries disabled, the
+        # SDK ceiling mirrors the client timeout (unchanged legacy behavior).
+        #
+        # Note: ``config.timeout = None`` disables *all* bounds — both the SDK
+        # ceiling (here) and the httpx client timeout (``httpx.Timeout(None)``
+        # in ``oauth.py``) — so a hung server hangs indefinitely. This is true
+        # with or without retries (the legacy path also yields ``None`` when
+        # ``timeout is None``), and is the caller's explicit choice: pairing
+        # ``timeout=None`` with retries removes the last remaining cancellation
+        # point. Keep a finite ``timeout`` if you want retries to stay bounded.
+        if self.config.max_retries > 0:
+            read_timeout = None
+        else:
+            read_timeout = datetime.timedelta(seconds=self.config.timeout) if self.config.timeout is not None else None
         return await self.session.call_tool(name, arguments, read_timeout_seconds=read_timeout)
 
 

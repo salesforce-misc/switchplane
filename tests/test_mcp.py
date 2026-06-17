@@ -1,3 +1,4 @@
+import datetime
 import os
 from contextlib import AsyncExitStack
 from unittest.mock import AsyncMock, MagicMock
@@ -233,6 +234,27 @@ class TestMcpSession:
         session = McpSession(cfg)
         with pytest.raises(RuntimeError, match="not initialized"):
             await session.call_tool("test_tool")
+
+    @pytest.mark.asyncio
+    async def test_call_tool_read_timeout_unbounded_when_retries_enabled(self):
+        # With retries on, the RetryTransport (per-attempt `timeout`) is the sole
+        # timeout authority; the SDK ceiling must be None so it can't cancel a
+        # live retry sequence.
+        cfg = McpServerConfig(name="test", url="http://x", timeout=30.0, max_retries=2)
+        session = McpSession(cfg)
+        session.session = AsyncMock()
+        await session.call_tool("t", {"a": 1})
+        _, kwargs = session.session.call_tool.call_args
+        assert kwargs["read_timeout_seconds"] is None
+
+    @pytest.mark.asyncio
+    async def test_call_tool_read_timeout_mirrors_timeout_when_retries_disabled(self):
+        cfg = McpServerConfig(name="test", url="http://x", timeout=30.0, max_retries=0)
+        session = McpSession(cfg)
+        session.session = AsyncMock()
+        await session.call_tool("t")
+        _, kwargs = session.session.call_tool.call_args
+        assert kwargs["read_timeout_seconds"] == datetime.timedelta(seconds=30.0)
 
 
 class TestMcpManager:
