@@ -402,6 +402,60 @@ def _retry_after_seconds(response: httpx.Response | None, attempt: int) -> float
     return min(max(0.0, backoff), _RETRY_BACKOFF_MAX_SECONDS)
 
 
+# JSON-RPC `error.code` for the synthesized exhausted-retry response. We reuse the
+# SDK's own REQUEST_TIMEOUT (HTTP 408) value — the same code the SDK's foreground
+# `anyio.fail_after` path uses for a read-timeout (see `BaseSession.send_request`)
+# — so the surfaced `McpError` reads as a timeout regardless of which path produced
+# it. JSON-RPC permits any integer code; matching the SDK keeps the two consistent.
+_EXHAUSTED_RETRY_ERROR_CODE = httpx.codes.REQUEST_TIMEOUT
+
+
+def _exhausted_retry_response(request: httpx.Request, exc: Exception) -> httpx.Response | None:
+    """Synthesize an in-band JSON-RPC error response for a request whose retries
+    are exhausted, so the MCP SDK forwards it to the waiting caller as a catchable
+    ``McpError`` instead of letting the raw transport fault crash the session.
+
+    The MCP streamable-HTTP SDK runs each id-bearing ``tools/call`` as a *background*
+    task in a session-scoped anyio task group (``post_writer`` → ``tg.start_soon``),
+    outside its own ``try/except``. A transport fault that escapes that task crashes
+    the whole group, cancels the foreground request, and detonates at session
+    teardown — taking the entire agent task down (a transient codesearch timeout
+    should never be fatal). Returning a JSON-RPC error response whose ``id`` echoes
+    the request lets the background task complete *normally*; the SDK demuxes it to
+    the foreground (``BaseSession._receive_response``) which raises ``McpError`` —
+    the tool loop's existing exception handling then feeds it back to the model.
+
+    Returns ``None`` when the request body has no usable JSON-RPC ``id`` (e.g. a
+    notification, or an unparseable body): there is no foreground waiter to route
+    a response to, so the caller must fall back to re-raising.
+    """
+    try:
+        payload = json.loads(request.content)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or "id" not in payload:
+        return None
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": payload["id"],
+            "error": {
+                "code": _EXHAUSTED_RETRY_ERROR_CODE,
+                "message": (
+                    f"transport fault after exhausting retries: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            },
+        }
+    ).encode()
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "application/json"},
+        content=body,
+        request=request,
+    )
+
+
 class RetryTransport(httpx.AsyncBaseTransport):
     """Wraps an httpx transport to retry transient failures transparently.
 
@@ -474,6 +528,24 @@ class RetryTransport(httpx.AsyncBaseTransport):
                 response = await self._wrapped.handle_async_request(request)
             except self._RETRYABLE_EXC as exc:
                 if attempt >= self._max_retries:
+                    # Retries exhausted. Re-raising here escapes back into the MCP
+                    # SDK's session-scoped task group (the request runs as a
+                    # `tg.start_soon` background task) and detonates at session
+                    # teardown, taking the whole agent task down. Instead, hand the
+                    # SDK an in-band JSON-RPC error response echoing the request id:
+                    # the background task completes normally and the fault surfaces
+                    # in the foreground as a catchable `McpError`. Only re-raise when
+                    # we can't synthesize one (no JSON-RPC id to route a response to).
+                    synthesized = _exhausted_retry_response(request, exc)
+                    logger.warning(
+                        "mcp_transport_retries_exhausted",
+                        server=self._server_name,
+                        max_retries=self._max_retries,
+                        error=type(exc).__name__,
+                        surfaced="in_band_error" if synthesized is not None else "reraised",
+                    )
+                    if synthesized is not None:
+                        return synthesized
                     raise
                 delay = _retry_after_seconds(None, attempt)
                 logger.warning(

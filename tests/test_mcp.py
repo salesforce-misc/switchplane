@@ -379,6 +379,109 @@ class TestMcpToolToLangchain:
         assert tool.name == "simple"
 
 
+class _FakeStreamCM:
+    """Async context manager standing in for `client.stream(...)`: raises the
+    queued outcome on enter, or yields a response stub with `status_code`."""
+
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    async def __aenter__(self):
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        resp = MagicMock()
+        resp.status_code = self._outcome
+        return resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePreflightClient:
+    """Fake httpx.AsyncClient that replays a queue of `stream()` outcomes."""
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.stream_calls = 0
+
+    def stream(self, method, url):
+        self.stream_calls += 1
+        return _FakeStreamCM(self._outcomes.pop(0))
+
+    async def aclose(self):
+        pass
+
+
+class TestPreflightRetry:
+    """Unit tests for the `_run_preflight` connectivity retry (no live endpoint)."""
+
+    @pytest.mark.asyncio
+    async def test_succeeds_first_try(self, monkeypatch):
+        from switchplane import mcp as mcp_mod
+
+        client = _FakePreflightClient([200])
+        sleep = AsyncMock()
+        monkeypatch.setattr(mcp_mod.asyncio, "sleep", sleep)
+        await mcp_mod._run_preflight(client, "https://x/mcp", "cs")
+        assert client.stream_calls == 1
+        assert sleep.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_benign(self, monkeypatch):
+        import httpx
+
+        from switchplane import mcp as mcp_mod
+
+        client = _FakePreflightClient([httpx.ConnectTimeout("slow")])
+        sleep = AsyncMock()
+        monkeypatch.setattr(mcp_mod.asyncio, "sleep", sleep)
+        # Must NOT raise — a GET timeout proves reachability for POST-oriented MCP.
+        await mcp_mod._run_preflight(client, "https://x/mcp", "cs")
+        assert client.stream_calls == 1
+        assert sleep.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_fault_then_raises(self, monkeypatch):
+        import httpx
+
+        from switchplane import mcp as mcp_mod
+
+        client = _FakePreflightClient([httpx.RemoteProtocolError("disconnected")] * 5)
+        sleep = AsyncMock()
+        monkeypatch.setattr(mcp_mod.asyncio, "sleep", sleep)
+        with pytest.raises(ConnectionError, match="Cannot reach MCP server 'cs'"):
+            await mcp_mod._run_preflight(client, "https://x/mcp", "cs")
+        # initial + 2 retries = 3 attempts, 2 backoff sleeps
+        assert client.stream_calls == 3
+        assert sleep.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_fault_then_succeeds(self, monkeypatch):
+        import httpx
+
+        from switchplane import mcp as mcp_mod
+
+        client = _FakePreflightClient([httpx.RemoteProtocolError("disconnected"), 200])
+        sleep = AsyncMock()
+        monkeypatch.setattr(mcp_mod.asyncio, "sleep", sleep)
+        await mcp_mod._run_preflight(client, "https://x/mcp", "cs")
+        assert client.stream_calls == 2  # one fault, then success
+        assert sleep.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_transient_error_raises_without_retry(self, monkeypatch):
+        from switchplane import mcp as mcp_mod
+
+        # A non-retryable fault (e.g. SSL) surfaces immediately, no retries.
+        client = _FakePreflightClient([ValueError("bad cert")])
+        sleep = AsyncMock()
+        monkeypatch.setattr(mcp_mod.asyncio, "sleep", sleep)
+        with pytest.raises(ConnectionError, match="Cannot reach MCP server 'cs'"):
+            await mcp_mod._run_preflight(client, "https://x/mcp", "cs")
+        assert client.stream_calls == 1
+        assert sleep.await_count == 0
+
+
 class TestPreflightIntegration:
     """Integration tests against a live MCP endpoint. Only run with ITEST=1."""
 
