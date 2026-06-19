@@ -1,5 +1,6 @@
 """MCP client lifecycle management and LangChain tool integration."""
 
+import asyncio
 import datetime
 import importlib
 import inspect
@@ -13,6 +14,59 @@ import structlog
 from switchplane.app import McpServerConfig
 
 logger = structlog.get_logger()
+
+# Preflight connectivity probe: retry a couple times on *transient* transport
+# faults before declaring a server unreachable. A momentary "server disconnected
+# without a response" (RemoteProtocolError) or connection drop on the startup GET
+# would otherwise abort the whole task before it begins — the same transient-fault-
+# is-fatal failure mode the RetryTransport absorbs for in-session tool calls, but on
+# the startup path the RetryTransport isn't in play yet. Persistent errors (DNS, SSL,
+# auth) fail on every attempt and still surface, so the diagnostic value is kept.
+_PREFLIGHT_MAX_ATTEMPTS = 3
+_PREFLIGHT_BACKOFF_SECONDS = 1.0
+
+
+async def _run_preflight(client, url: str, server_name: str) -> None:
+    """Probe *url* with a GET, retrying transient transport faults.
+
+    A successful response (any status) or a timeout proves reachability — MCP
+    endpoints are POST-oriented, so a GET timeout is expected and benign. A
+    transient transport fault (connection drop / "server disconnected without a
+    response") is retried with capped exponential backoff; only after attempts
+    are exhausted, or on a non-transient error (DNS/SSL/etc.), does it raise
+    ``ConnectionError``. ``client`` is an already-built ``httpx.AsyncClient``;
+    its lifecycle (close) is the caller's responsibility.
+    """
+    import httpx
+
+    # Mirrors `RetryTransport._RETRYABLE_EXC` minus the timeout, which is its
+    # own benign "reachable" signal below.
+    retryable = (httpx.ConnectError, httpx.RemoteProtocolError)
+    attempt = 0
+    while True:
+        try:
+            async with client.stream("GET", url) as resp:
+                logger.info("mcp_preflight_ok", server=server_name, status=resp.status_code)
+            return
+        except httpx.TimeoutException:
+            logger.info("mcp_preflight_timeout", server=server_name)
+            return
+        except retryable as e:
+            if attempt >= _PREFLIGHT_MAX_ATTEMPTS - 1:
+                raise ConnectionError(f"Cannot reach MCP server '{server_name}' at {url}: {e}") from e
+            delay = _PREFLIGHT_BACKOFF_SECONDS * (2**attempt)
+            logger.warning(
+                "mcp_preflight_retrying",
+                server=server_name,
+                attempt=attempt + 1,
+                max_attempts=_PREFLIGHT_MAX_ATTEMPTS,
+                error=type(e).__name__,
+                delay_seconds=round(delay, 1),
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+        except Exception as e:
+            raise ConnectionError(f"Cannot reach MCP server '{server_name}' at {url}: {e}") from e
 
 
 def _import_transport_factory(dotted_path: str):
@@ -122,12 +176,7 @@ class McpSession:
                 )
 
             try:
-                async with preflight_client.stream("GET", self.config.url) as resp:
-                    logger.info("mcp_preflight_ok", server=self.config.name, status=resp.status_code)
-            except httpx.TimeoutException:
-                logger.info("mcp_preflight_timeout", server=self.config.name)
-            except Exception as e:
-                raise ConnectionError(f"Cannot reach MCP server '{self.config.name}' at {self.config.url}: {e}") from e
+                await _run_preflight(preflight_client, self.config.url, self.config.name)
             finally:
                 if self.config.oauth or http_client is None:
                     await preflight_client.aclose()

@@ -5,6 +5,7 @@ flows (browser redirect, callback server) are exercised via integration tests
 elsewhere; here we cover the rate-limit retry that wraps the MCP HTTP client.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -195,12 +196,47 @@ async def test_retry_transport_replays_body_unchanged_across_retries():
     assert inner.seen_bodies == [b'{"jsonrpc":"2.0"}', b'{"jsonrpc":"2.0"}']
 
 
-async def test_retry_transport_reraises_timeout_after_max_retries():
+async def test_retry_transport_reraises_timeout_after_max_retries_without_id():
+    # `_req()`'s body carries no JSON-RPC `id`, so there is no foreground waiter
+    # to route a synthesized error response to — the transport must re-raise.
     inner = _FaultTransport([httpx.ReadTimeout("hung")] * 5)
     rt = RetryTransport(inner, max_retries=2, server_name="codesearch")
     with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()), pytest.raises(httpx.ReadTimeout):
         await rt.handle_async_request(_req())
     assert inner.request_count == 3  # initial + 2 retries
+
+
+def _req_with_id(request_id=7):
+    # An id-bearing JSON-RPC request, as the MCP SDK sends for `tools/call`.
+    body = f'{{"jsonrpc":"2.0","id":{request_id},"method":"tools/call"}}'.encode()
+    return httpx.Request("POST", "https://mcp.codesearch/mcp", content=body)
+
+
+async def test_retry_transport_synthesizes_in_band_error_on_exhaustion_with_id():
+    # An id-bearing request whose retries are exhausted must NOT re-raise (that
+    # would crash the SDK's session task group); it returns a JSON-RPC error
+    # response echoing the request id so the SDK surfaces a catchable McpError.
+    inner = _FaultTransport([httpx.ReadTimeout("hung")] * 5)
+    rt = RetryTransport(inner, max_retries=2, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()):
+        resp = await rt.handle_async_request(_req_with_id(7))
+    assert inner.request_count == 3  # initial + 2 retries
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "application/json"
+    payload = json.loads(resp.content)
+    assert payload["id"] == 7
+    assert payload["error"]["code"] == int(httpx.codes.REQUEST_TIMEOUT)
+    assert "ReadTimeout" in payload["error"]["message"]
+
+
+async def test_retry_transport_connect_error_exhaustion_also_synthesizes():
+    inner = _FaultTransport([httpx.ConnectError("refused")] * 5)
+    rt = RetryTransport(inner, max_retries=1, server_name="codesearch")
+    with patch("switchplane.oauth.asyncio.sleep", new=AsyncMock()):
+        resp = await rt.handle_async_request(_req_with_id(3))
+    payload = json.loads(resp.content)
+    assert payload["id"] == 3
+    assert "ConnectError" in payload["error"]["message"]
 
 
 async def test_retry_transport_retries_connect_error():
