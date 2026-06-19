@@ -441,10 +441,7 @@ def _exhausted_retry_response(request: httpx.Request, exc: Exception) -> httpx.R
             "id": payload["id"],
             "error": {
                 "code": _EXHAUSTED_RETRY_ERROR_CODE,
-                "message": (
-                    f"transport fault after exhausting retries: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
+                "message": (f"transport fault after exhausting retries: {type(exc).__name__}: {exc}"),
             },
         }
     ).encode()

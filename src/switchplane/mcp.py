@@ -53,9 +53,7 @@ async def _run_preflight(client, url: str, server_name: str) -> None:
             return
         except retryable as e:
             if attempt >= _PREFLIGHT_MAX_ATTEMPTS - 1:
-                raise ConnectionError(
-                    f"Cannot reach MCP server '{server_name}' at {url}: {e}"
-                ) from e
+                raise ConnectionError(f"Cannot reach MCP server '{server_name}' at {url}: {e}") from e
             delay = _PREFLIGHT_BACKOFF_SECONDS * (2**attempt)
             logger.warning(
                 "mcp_preflight_retrying",
@@ -68,9 +66,7 @@ async def _run_preflight(client, url: str, server_name: str) -> None:
             await asyncio.sleep(delay)
             attempt += 1
         except Exception as e:
-            raise ConnectionError(
-                f"Cannot reach MCP server '{server_name}' at {url}: {e}"
-            ) from e
+            raise ConnectionError(f"Cannot reach MCP server '{server_name}' at {url}: {e}") from e
 
 
 def _import_transport_factory(dotted_path: str):
