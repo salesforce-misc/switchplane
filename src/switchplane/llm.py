@@ -89,6 +89,21 @@ def context_window(model: str) -> int:
     return info.context_window if info else 200_000
 
 
+def get_model_vendor(model: str) -> str | None:
+    """Extract the vendor prefix from a model name.
+
+    Returns:
+        "claude", "gemini", or "gpt" for recognized prefixes, None otherwise.
+    """
+    if model.startswith("claude"):
+        return "claude"
+    elif model.startswith("gemini"):
+        return "gemini"
+    elif model.startswith("gpt"):
+        return "gpt"
+    return None
+
+
 def build_llm(
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
@@ -101,7 +116,9 @@ def build_llm(
       - gemini-* -> ChatGoogleGenerativeAI (requires langchain-google-genai)
       - gpt-*    -> ChatOpenAI (requires langchain-openai)
     """
-    if model.startswith("claude"):
+    vendor = get_model_vendor(model)
+
+    if vendor == "claude":
         try:
             from langchain_anthropic import ChatAnthropic
         except ImportError:
@@ -112,7 +129,7 @@ def build_llm(
         if base_url:
             kwargs["anthropic_api_url"] = base_url
         return ChatAnthropic(**kwargs)
-    elif model.startswith("gemini"):
+    elif vendor == "gemini":
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
@@ -123,7 +140,7 @@ def build_llm(
         if api_key:
             kwargs["google_api_key"] = api_key
         return ChatGoogleGenerativeAI(**kwargs)
-    elif model.startswith("gpt"):
+    elif vendor == "gpt":
         try:
             from langchain_openai import ChatOpenAI
         except ImportError:

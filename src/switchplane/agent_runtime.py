@@ -210,8 +210,9 @@ class AgentContext:
         task_id: Unique identifier for this task execution.
         task_name: The registered name of the task.
         config: Dict of merged app + user configuration (from TOML
-            config cascade). Access agent-specific settings, API keys,
-            model names, etc. via this dict.
+            config cascade). Access settings, API keys, model names,
+            etc. via this dict. For LLMs prefer ``llm()``, which
+            resolves the provider pool for you.
 
     Logging:
         Standard library ``logging`` calls are automatically forwarded
@@ -253,6 +254,70 @@ class AgentContext:
         if self._db_path is None:
             raise RuntimeError("runtime_dir not available")
         return Path(self._db_path).parent
+
+    @property
+    def providers(self) -> list[str]:
+        """Names of configured `[llm.providers]` entries.
+
+        Use to degrade gracefully when an optional provider is not configured::
+
+            model = ctx.llm("cheap") if "cheap" in ctx.providers else ctx.llm()
+        """
+        return sorted((self.config.get("llm") or {}).get("providers") or {})
+
+    def llm(self, name: str | None = None, *, model: str | None = None):
+        """Build a LangChain chat model from the configured provider pool.
+
+        Args:
+            name: Pool entry from ``[llm.providers.<name>]``. ``None`` uses the
+                ``[llm]`` block.
+            model: Override the resolved provider's model while keeping its
+                credential and base URL. This is the gateway case — one endpoint
+                and token serving many models — and avoids needing a pool entry
+                per model.
+
+        Raises:
+            KeyError: If *name* is not a configured provider.
+            ImportError: If the adapter for the resolved model is not installed.
+            ValueError: If *model* override crosses vendor boundaries unsafely.
+        """
+        # Imported lazily: langchain_core is an optional dependency
+        # (switchplane[llm]), so importing at module scope would make it
+        # mandatory for every app.
+        from switchplane.config import resolve_provider
+        from switchplane.llm import build_llm, get_model_vendor
+
+        provider = resolve_provider(self.config, name)
+        final_model = model or provider.model
+
+        # Guard against credential-crossing when model= overrides across vendors.
+        # Safe when base_url is set AND the target adapter honours it (gateway case).
+        # Unsafe when base_url is None (direct-to-vendor) or when the target adapter
+        # discards base_url (Gemini), because the credential goes to the wrong endpoint.
+        if model:
+            original_vendor = get_model_vendor(provider.model)
+            override_vendor = get_model_vendor(model)
+
+            if original_vendor and override_vendor and original_vendor != override_vendor:
+                # Crossing vendor boundary with model= override
+                if not provider.base_url:
+                    # Direct-to-vendor: wrong credential will be sent to wrong vendor
+                    raise ValueError(
+                        f"Cannot override model from {provider.model!r} to {model!r}: "
+                        f"crossing vendor boundary without base_url would send "
+                        f"{original_vendor}:* credentials to {override_vendor}:* adapter. "
+                        f"Use a separate [llm.providers.<name>] entry with its own credential."
+                    )
+                elif override_vendor == "gemini":
+                    # Gemini adapter discards base_url, so gateway bypass + credential leak
+                    raise ValueError(
+                        f"Cannot override model to {model!r}: the Gemini adapter discards "
+                        f"base_url, so your gateway token would be sent to Google's public "
+                        f"endpoint instead of {provider.base_url!r}. "
+                        f"Use a separate [llm.providers.<name>] entry."
+                    )
+
+        return build_llm(final_model, provider.api_key, provider.base_url)
 
     @property
     def mcp(self):
@@ -915,6 +980,27 @@ async def agent_main(ipc_fd: int, entry_point: str) -> None:
             _logger.warning("task_mcp_server_not_available", server=name, task=task_class.name)
     else:
         mcp_configs = []
+
+    # Warn on declared-but-unconfigured LLM providers. Advisory only — the task
+    # still runs, and ctx.llm() raises KeyError at the call site if it is used.
+    if task_class.providers:
+        from switchplane.config import DEFAULT_PROVIDER
+
+        # Guard against common mistakes: None or a bare string instead of a list
+        if not isinstance(task_class.providers, list):
+            _logger.warning(
+                "task_llm_providers_not_a_list",
+                task=task_class.name,
+                providers_type=type(task_class.providers).__name__,
+                message="Task.providers must be a list of strings; ignoring",
+            )
+        else:
+            for name in task_class.providers:
+                # Skip "default" sentinel — it always resolves to [llm] block
+                if name == DEFAULT_PROVIDER:
+                    continue
+                if name not in ctx.providers:
+                    _logger.warning("task_llm_provider_not_configured", provider=name, task=task_class.name)
 
     # Instantiate and bind parameters BEFORE `task.started`, so
     # `startup_info()` (called inside `_execute_task`) can surface

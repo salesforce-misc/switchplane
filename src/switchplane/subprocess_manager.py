@@ -154,13 +154,9 @@ class SubprocessManager:
         base = agent_spec.module_path.rsplit(".", 1)[0]
         task_module = f"{base}.tasks.{task.task_name}"
 
-        # Build per-agent config: global config with agent-specific overrides
-        if config:
-            agent_config = config.model_dump()
-            overrides = agent_config.pop("agents", {}).get(agent_spec.agent_name, {})
-            _deep_merge(agent_config, overrides)
-        else:
-            agent_config = {}
+        # Every agent receives the same merged app + user config. Providers are
+        # selected per call site via ctx.llm(<name>), not per agent.
+        agent_config = config.model_dump() if config else {}
 
         # Resolve MCP server configs for this agent
         mcp_configs = []

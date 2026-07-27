@@ -9,7 +9,6 @@ from langgraph.types import Command, interrupt
 
 from switchplane import Task, command
 from switchplane.agent_runtime import AgentContext
-from switchplane.llm import build_llm
 
 
 class ChatState(TypedDict):
@@ -50,9 +49,7 @@ class ChatTask(Task):
         return {"status": "ending"}
 
     async def run(self, ctx: AgentContext) -> None:
-        llm_config = ctx.config.get("llm", {})
-        model = llm_config.get("model", "claude-sonnet-4-20250514")
-        llm = build_llm(model, llm_config.get("api_key"), llm_config.get("base_url"))
+        llm = ctx.llm()
 
         graph = build_graph(llm).compile(checkpointer=ctx.checkpointer)
         config = {"configurable": {"thread_id": ctx.task_id}}

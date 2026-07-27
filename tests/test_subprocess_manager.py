@@ -696,3 +696,5 @@ class TestCleanupHandle:
 
         await mgr._cleanup_handle(mock_handle)  # should not raise
         assert "a1" not in mgr._handles
+
+

@@ -60,7 +60,9 @@ tests/                     # Test directory (pytest)
 
 ## Configuration
 
-Two-layer cascading TOML config. App-bundled defaults (specified via `Application(default_config=Path(...))`) are deep-merged with user-level overrides at `~/.{app_name}/config.toml`. User config wins on conflict. Apps ship base URLs, model defaults, and agent settings; users provide personal config like API keys. Pydantic model: `AppConfig` with `LLMConfig` and per-agent dicts. Config is passed to agent subprocesses via the `execute_task` command payload and available as `ctx.config` in the agent runtime.
+Two-layer cascading TOML config. App-bundled defaults (specified via `Application(default_config=Path(...))`) are deep-merged with user-level overrides at `~/.{app_name}/config.toml`. User config wins on conflict. Apps ship base URLs and model defaults; users provide personal config like API keys. Pydantic model: `AppConfig` with `LLMConfig`. Config is passed to agent subprocesses via the `execute_task` command payload and available as `ctx.config` in the agent runtime.
+
+Tasks can use multiple LLM providers via `ctx.llm(name)`, which resolves from the `[llm.providers.<name>]` pool. Each pool entry has independent credentials (api_key, base_url, model). The `[llm]` block serves as the default provider. Per-task resolution means provider variation is per-call-site, not per-agent.
 
 ## How to run
 

@@ -200,9 +200,6 @@ app = Application(name="myapp", default_config=Path(__file__).parent / "config.t
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 base_url = "https://corp-proxy.internal/v1"
-
-[agents.bot]
-system_prompt = "You are a helpful assistant."
 ```
 
 ### User overrides
@@ -213,13 +210,31 @@ Users provide personal config at `~/.{app_name}/config.toml`. This is deep-merge
 # ~/.myapp/config.toml (personal, never checked in)
 [llm]
 api_key = "sk-ant-..."
-
-# Per-agent overrides (deep-merged onto global config)
-[agents.bot.llm]
-model = "claude-haiku-4-5-20251001"
 ```
 
-Global config is available to all agents via `ctx.config`. Per-agent sections under `[agents.<name>]` are deep-merged onto the global config before delivery, so `agents.bot.llm.model` overrides `llm.model` for the bot agent only.
+### Provider pool
+
+To use multiple LLM providers in one task, configure a provider pool under `[llm.providers.<name>]`. Each entry has independent credentials:
+
+```toml
+[llm]
+model = "claude-sonnet-4-20250514"
+api_key = "sk-ant-..."
+
+[llm.providers.smart]
+model = "claude-opus-4-6-v1"
+api_key = "sk-ant-..."
+
+[llm.providers.cheap]
+model = "gemini-2.5-flash"
+api_key = "gai-..."
+```
+
+Tasks resolve providers at runtime via `ctx.llm(name)` without being statically bound to any of them. See [LLM integration](#llm-integration) for usage.
+
+**Caution:** When overriding a pool entry across config layers (e.g., app defaults ship `[llm.providers.cheap]` with a Gemini model+key, you override to an OpenAI model in `~/.myapp/config.toml`), set both `model` and `api_key` together in the same layer. Overriding only `model` inherits the stale `api_key` from the other layer, which forwards the wrong credential to the wrong vendor.
+
+Global config is available to all agents via `ctx.config`.
 
 ### Custom CA certificates
 
@@ -565,19 +580,25 @@ Agents don't need to do anything special for OAuth-enabled servers. Switchplane 
 
 Switchplane includes an optional LLM module that instantiates LangChain chat models from config. It routes to the correct adapter based on model name prefix — no provider-specific code in your tasks.
 
+The simplest path is `ctx.llm()`, which resolves from the `[llm]` block or a named provider pool entry:
+
+```python
+async def run(self, ctx: AgentContext) -> None:
+    llm = ctx.llm()                                   # default provider ([llm] block)
+    fast = ctx.llm("cheap")                           # named pool entry
+    alt = ctx.llm(model="claude-haiku-4-5-20251001")  # override model, keep credential
+```
+
+`ctx.llm(name=None, *, model=None)` returns a LangChain chat model. `name` selects an `[llm.providers.<name>]` entry; `None` or `"default"` uses the `[llm]` block. `model` overrides the entry's model while keeping its credential and `base_url` — useful for gateway installs where one endpoint serves multiple models.
+
+The `model` override is only safe within a single vendor (e.g. switching between Claude models on an Anthropic credential) or when the resolved provider has a `base_url` that fronts multiple vendors. Overriding across vendors without a `base_url` raises `ValueError` because the credential would be sent to the wrong vendor's endpoint. Similarly, overriding to a `gemini-*` model on a config with a `base_url` also raises an error: the Google adapter has no `base_url` parameter and would silently send your gateway token to Google's public endpoint. To use a genuinely different vendor, define a `[llm.providers.<name>]` entry with its own credential instead.
+
+If you need lower-level access to config, use `build_llm` directly:
+
 ```python
 from switchplane.llm import build_llm
 
 llm = build_llm("claude-sonnet-4-20250514", api_key="sk-ant-...", base_url=None)
-```
-
-In practice, you pull these values from the task's config:
-
-```python
-async def run(self, ctx: AgentContext) -> None:
-    cfg = ctx.config.get("llm", {})
-    llm = build_llm(cfg.get("model"), cfg.get("api_key"), cfg.get("base_url"))
-    llm_with_tools = llm.bind_tools(tools)
 ```
 
 Routing rules:

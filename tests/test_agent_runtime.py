@@ -1282,3 +1282,253 @@ class TestTaskMcpServerFiltering:
         assert model is not None
         assert "custom" in model.model_fields
         assert "mcp_servers" not in model.model_fields
+
+
+class TestAgentContextProviders:
+    """§7.4: ctx.providers property returns sorted pool names."""
+
+    def test_providers_sorted_when_configured(self):
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(
+            task_id="t1",
+            task_name="test",
+            ipc_sock=agent_sock,
+            config={
+                "llm": {
+                    "providers": {
+                        "zebra": {"model": "gpt-4o"},
+                        "alpha": {"model": "claude"},
+                        "middle": {"model": "gemini"},
+                    }
+                }
+            },
+        )
+        assert ctx.providers == ["alpha", "middle", "zebra"]
+        agent_sock.close()
+
+    def test_providers_empty_when_unconfigured(self):
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={"llm": {}})
+        assert ctx.providers == []
+        agent_sock.close()
+
+    def test_providers_empty_when_no_llm_section(self):
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
+        assert ctx.providers == []
+        agent_sock.close()
+
+
+class TestAgentContextLLM:
+    """§7.4: ctx.llm() resolves from the provider pool, patching build_llm.
+
+    Assertions are derived from the spec, not from the implementation. Where spec
+    and code disagree, the spec wins — tests failing is a finding to report."""
+
+    @pytest.fixture
+    def ctx_with_pool(self):
+        """A context with a full provider pool covering the spec's test cases."""
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(
+            task_id="t1",
+            task_name="test",
+            ipc_sock=agent_sock,
+            config={
+                "llm": {
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "ant-key",
+                    "base_url": "https://default/v1",
+                    "providers": {
+                        "cheap": {
+                            "model": "gemini-2.5-flash",
+                            "api_key": "gai-key",
+                            "base_url": "https://gemini.googleapis.com/v1",
+                        },
+                        "gateway": {
+                            "model": "gpt-4o",
+                            "api_key": "gw-tok",
+                            "base_url": "https://gw.internal/v1",
+                        },
+                    },
+                }
+            },
+        )
+        yield ctx
+        agent_sock.close()
+
+    def test_llm_no_name_resolves_to_llm_block(self, ctx_with_pool, monkeypatch):
+        """Spec §7.4 first bullet: ctx.llm() → [llm] model/key/base_url."""
+        captured = []
+
+        def _fake_build(model, api_key, base_url):
+            captured.append((model, api_key, base_url))
+            return "mock_llm"
+
+        # llm() imports build_llm lazily inside the method body.
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _fake_build)
+
+        ctx_with_pool.llm()
+        assert len(captured) == 1
+        assert captured[0] == ("claude-sonnet-4-20250514", "ant-key", "https://default/v1")
+
+    def test_llm_named_entry_resolves_to_that_entry(self, ctx_with_pool, monkeypatch):
+        """Spec §7.4 second bullet: ctx.llm("cheap") → that entry's triple."""
+        captured = []
+
+        def _fake_build(model, api_key, base_url):
+            captured.append((model, api_key, base_url))
+            return "mock_llm"
+
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _fake_build)
+
+        ctx_with_pool.llm("cheap")
+        assert len(captured) == 1
+        assert captured[0] == ("gemini-2.5-flash", "gai-key", "https://gemini.googleapis.com/v1")
+
+    def test_llm_model_override_preserves_credential_and_base_url(self, ctx_with_pool, monkeypatch):
+        """Spec §7.4 third bullet: ctx.llm("gateway", model=...) →
+        (override_model, gateway_key, gateway_url) — model override applies, cred and URL preserved.
+
+        This is the load-bearing gateway case: one endpoint and token serve many models.
+
+        The override model must DIFFER from the fixture's configured model (gpt-4o) or the
+        assertion is vacuous — it would pass even if the override were silently dropped."""
+        captured = []
+
+        def _fake_build(model, api_key, base_url):
+            captured.append((model, api_key, base_url))
+            return "mock_llm"
+
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _fake_build)
+
+        # Override with a different model than the entry's configured "gpt-4o"
+        ctx_with_pool.llm("gateway", model="claude-opus-4-6-v1")
+        assert len(captured) == 1
+        assert captured[0] == ("claude-opus-4-6-v1", "gw-tok", "https://gw.internal/v1")
+
+    def test_llm_unknown_name_raises_keyerror(self, ctx_with_pool):
+        """Spec §7.4 fourth bullet: ctx.llm("nope") → KeyError."""
+        with pytest.raises(KeyError):
+            ctx_with_pool.llm("nope")
+
+    def test_llm_keyerror_message_names_unknown_and_lists_configured(self, ctx_with_pool):
+        """Spec §7.4 fourth bullet expanded: KeyError message names the unknown
+        provider AND lists configured ones."""
+        with pytest.raises(KeyError) as exc:
+            ctx_with_pool.llm("nope")
+        msg = str(exc.value)
+        assert "nope" in msg
+        assert "cheap" in msg
+        assert "gateway" in msg
+
+    def test_llm_empty_config_resolves_via_defaults(self):
+        """Spec §7.4 sixth bullet: Empty ctx.config ({}) → ctx.llm() still resolves
+        via LLMConfig defaults rather than raising."""
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(task_id="t1", task_name="test", ipc_sock=agent_sock, config={})
+
+        from unittest.mock import MagicMock
+
+        import switchplane.llm as llm_mod
+
+        mock_build = MagicMock(return_value="mock_llm")
+        original_build = llm_mod.build_llm
+        llm_mod.build_llm = mock_build
+        try:
+            ctx.llm()
+            # Should call build_llm with DEFAULT_MODEL and None for key/url
+            from switchplane.config import DEFAULT_MODEL
+
+            mock_build.assert_called_once()
+            args = mock_build.call_args[0]
+            assert args[0] == DEFAULT_MODEL
+            assert args[1] is None  # api_key
+            assert args[2] is None  # base_url
+        finally:
+            llm_mod.build_llm = original_build
+            agent_sock.close()
+
+    def test_llm_missing_langchain_core_raises_importerror(self, monkeypatch):
+        """Spec §7.4 seventh bullet: Missing langchain_core → ImportError propagates
+        with install guidance.
+
+        build_llm already raises ImportError with guidance when the adapter is missing;
+        this tests that ctx.llm() does not swallow it."""
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(
+            task_id="t1",
+            task_name="test",
+            ipc_sock=agent_sock,
+            config={"llm": {"model": "claude-sonnet-4-20250514"}},
+        )
+
+        def _boom(*args, **kwargs):
+            raise ImportError(
+                "LLM support requires langchain_core. Install with: pip install switchplane[llm]"
+            )
+
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _boom)
+
+        with pytest.raises(ImportError, match="langchain_core"):
+            ctx.llm()
+        agent_sock.close()
+
+    def test_llm_model_override_on_default_provider(self, ctx_with_pool, monkeypatch):
+        """ctx.llm(model="gpt-4o") — model override with no name resolves the
+        [llm] block's credential and uses the override model. This is the
+        same-credential-different-model case: one token serves many models."""
+        captured = []
+
+        def _fake_build(model, api_key, base_url):
+            captured.append((model, api_key, base_url))
+            return "mock_llm"
+
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _fake_build)
+
+        ctx_with_pool.llm(model="gpt-4o")
+        assert len(captured) == 1
+        assert captured[0] == ("gpt-4o", "ant-key", "https://default/v1")
+
+    def test_llm_no_inherit_from_llm_block(self, monkeypatch):
+        """An entry defining only `model` resolves with api_key=None and base_url=None,
+        NOT the [llm] block's values. This pins no-inherit — the entry is readable in
+        isolation, and inheriting would risk sending the wrong credential to the wrong
+        vendor (the bug the pool exists to prevent)."""
+        _, agent_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctx = AgentContext(
+            task_id="t1",
+            task_name="test",
+            ipc_sock=agent_sock,
+            config={
+                "llm": {
+                    "api_key": "ant-key",
+                    "base_url": "https://default/v1",
+                    "providers": {"bare": {"model": "gpt-4o"}},
+                }
+            },
+        )
+        captured = []
+
+        def _fake_build(model, api_key, base_url):
+            captured.append((model, api_key, base_url))
+            return "mock_llm"
+
+        import switchplane.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "build_llm", _fake_build)
+
+        ctx.llm("bare")
+        assert len(captured) == 1
+        # api_key and base_url must be None, NOT the [llm] block's values.
+        assert captured[0] == ("gpt-4o", None, None)
+        agent_sock.close()
