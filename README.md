@@ -591,6 +591,19 @@ async def run(self, ctx: AgentContext) -> None:
 
 `ctx.llm(name=None, *, model=None)` returns a LangChain chat model. `name` selects an `[llm.providers.<name>]` entry; `None` or `"default"` uses the `[llm]` block. `model` overrides the entry's model while keeping its credential and `base_url` — useful for gateway installs where one endpoint serves multiple models.
 
+`ctx.providers` lists the configured pool entry names (sorted). Because a task discovers providers at runtime rather than naming them statically, one task body can fan out across however many the operator configured:
+
+```python
+for name in ctx.providers:                  # [] when only [llm] is set
+    llm = ctx.llm(name)
+```
+
+Use it to degrade gracefully instead of hard-failing on an absent optional provider:
+
+```python
+llm = ctx.llm("cheap") if "cheap" in ctx.providers else ctx.llm()
+```
+
 The `model` override is only safe within a single vendor (e.g. switching between Claude models on an Anthropic credential) or when the resolved provider has a `base_url` that fronts multiple vendors. Overriding across vendors without a `base_url` raises `ValueError` because the credential would be sent to the wrong vendor's endpoint. Similarly, overriding to a `gemini-*` model on a config with a `base_url` also raises an error: the Google adapter has no `base_url` parameter and would silently send your gateway token to Google's public endpoint. To use a genuinely different vendor, define a `[llm.providers.<name>]` entry with its own credential instead.
 
 If you need lower-level access to config, use `build_llm` directly:

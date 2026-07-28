@@ -1,4 +1,8 @@
-.PHONY: test test-cov install-test install-e2e e2e lint static format formatcheck clean
+.PHONY: test test-unit test-examples test-cov install-test install-examples install-e2e e2e lint static format formatcheck clean
+
+# Example test suites live outside `testpaths`, so they are named explicitly here.
+# Any examples/<name>/tests/ directory is picked up automatically.
+EXAMPLE_TESTS := $(wildcard examples/*/tests)
 
 install-test:
 	uv pip install -e ".[test]"
@@ -9,8 +13,18 @@ install-e2e:
 install-examples:
 	uv pip install -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot -e examples/quality
 
-test:
+test: test-unit test-examples
+
+test-unit:
 	uv run pytest tests/ -v -n auto
+
+# Requires the example packages on the path: make install-examples
+test-examples:
+ifeq ($(EXAMPLE_TESTS),)
+	@echo "No example test suites found; skipping."
+else
+	uv run pytest $(EXAMPLE_TESTS) -v -n auto
+endif
 
 itest:
 	ITEST=1 uv run pytest -n auto tests/ -v
