@@ -7,7 +7,7 @@ install-e2e:
 	uv pip install -e ".[test]" -e examples/hello
 
 install-examples:
-	uv pip install -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot
+	uv pip install -e examples/hello -e examples/weather -e examples/devops -e examples/chatbot -e examples/quality
 
 test:
 	uv run pytest tests/ -v -n auto

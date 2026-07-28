@@ -1,0 +1,14 @@
+[llm]
+model = "claude-sonnet-4-20250514"
+
+[llm.providers.opus]
+model = "claude-opus-4-20250514"
+
+[llm.providers.gpt]
+model = "gpt-4o"
+
+[review]
+allowed_hosts = ["github.com"]
+
+[logging]
+level = "INFO"

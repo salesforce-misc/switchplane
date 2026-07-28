@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quality"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "switchplane[llm]",
+    "langchain-anthropic",
+    "langchain-openai",
+]
+
+[project.scripts]
+quality = "quality.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quality"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"quality/config.toml" = "quality/config.toml"

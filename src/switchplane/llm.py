@@ -72,14 +72,17 @@ MODELS: dict[str, ModelInfo] = {
     "claude-sonnet-4-6": ModelInfo("claude-sonnet-4-6", 200_000),
     "claude-opus-4-20250514": ModelInfo("claude-opus-4-20250514", 200_000),
     "claude-opus-4-6-v1": ModelInfo("claude-opus-4-6-v1", 200_000),
+    "claude-opus-4-8": ModelInfo("claude-opus-4-8", 200_000),
     "claude-haiku-4-5-20251001": ModelInfo("claude-haiku-4-5-20251001", 200_000),
     # Google — 1M context
     "gemini-2.0-flash": ModelInfo("gemini-2.0-flash", 1_000_000),
     "gemini-2.5-pro": ModelInfo("gemini-2.5-pro", 1_000_000),
     "gemini-2.5-flash": ModelInfo("gemini-2.5-flash", 1_000_000),
-    # OpenAI — 128k context
+    # OpenAI — most models 128k context
     "gpt-4o": ModelInfo("gpt-4o", 128_000),
     "gpt-4o-mini": ModelInfo("gpt-4o-mini", 128_000),
+    # OpenAI — newer models with 200k context
+    "gpt-5.5": ModelInfo("gpt-5.5", 200_000),
 }
 
 

@@ -15,6 +15,7 @@ from switchplane.llm import (
     build_llm,
     context_window,
     extract_response_text,
+    get_model_vendor,
     run_tool_loop,
 )
 
@@ -51,15 +52,38 @@ class TestModelsRegistry:
         for key in gemini:
             assert MODELS[key].context_window == 1_000_000, key
 
-    def test_all_openai_models_have_128k_context(self):
-        openai = [k for k in MODELS if k.startswith("gpt")]
-        assert openai, "No OpenAI models in registry"
-        for key in openai:
+    def test_gpt_4o_family_has_128k_context(self):
+        """The 4o family is 128k. Deliberately NOT a vendor-wide invariant:
+        OpenAI context windows are per-model, and asserting "every gpt-* is
+        128k" made registering a larger model (gpt-5.5, 200k) fail a test that
+        had nothing to do with it. Anthropic/Gemini keep their vendor-wide
+        assertions because those families really are uniform today; add a
+        per-model test here instead of widening this one.
+        """
+        four_o = [k for k in MODELS if k.startswith("gpt-4o")]
+        assert four_o, "No gpt-4o models in registry"
+        for key in four_o:
             assert MODELS[key].context_window == 128_000, key
 
     def test_model_name_matches_key(self):
         for key, info in MODELS.items():
             assert info.name == key
+
+    def test_claude_opus_4_8_registered(self):
+        """claude-opus-4-8 must be in MODELS with 200k context.
+
+        Pins explicit registration rather than relying on prefix fallback.
+        """
+        assert "claude-opus-4-8" in MODELS
+        assert MODELS["claude-opus-4-8"].context_window == 200_000
+
+    def test_gpt_5_5_registered(self):
+        """gpt-5.5 must be in MODELS with 200k context.
+
+        Pins explicit registration rather than relying on prefix fallback.
+        """
+        assert "gpt-5.5" in MODELS
+        assert MODELS["gpt-5.5"].context_window == 200_000
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +109,29 @@ class TestContextWindow:
 
     def test_returns_int(self):
         assert isinstance(context_window(DEFAULT_MODEL), int)
+
+    def test_claude_opus_4_8_returns_registered_context(self):
+        """claude-opus-4-8 must return its registered 200k, not the fallback."""
+        assert context_window("claude-opus-4-8") == 200_000
+
+    def test_gpt_5_5_returns_registered_context(self):
+        """gpt-5.5 must return its registered 200k, not the fallback."""
+        assert context_window("gpt-5.5") == 200_000
+
+
+# ---------------------------------------------------------------------------
+# get_model_vendor
+# ---------------------------------------------------------------------------
+
+
+class TestGetModelVendor:
+    def test_claude_opus_4_8_returns_claude(self):
+        """claude-opus-4-8 must route to the claude vendor."""
+        assert get_model_vendor("claude-opus-4-8") == "claude"
+
+    def test_gpt_5_5_returns_gpt(self):
+        """gpt-5.5 must route to the gpt vendor."""
+        assert get_model_vendor("gpt-5.5") == "gpt"
 
 
 # ---------------------------------------------------------------------------
