@@ -419,3 +419,13 @@ class TestSynthesisPrompt:
         prompt_lower = SYNTHESIS_PROMPT.lower()
         assert "summary" in prompt_lower
         assert "not" in prompt_lower or "must not" in prompt_lower or "do not" in prompt_lower
+
+    def test_requires_substantive_descriptive_assessment(self):
+        """The summary must assess material risk and test confidence, not say only "looks good"."""
+        from quality.agents.pr.prompts import SYNTHESIS_PROMPT
+
+        prompt_lower = SYNTHESIS_PROMPT.lower()
+        assert "descriptive" in prompt_lower or "substantive" in prompt_lower
+        assert "material risk" in prompt_lower
+        assert "test confidence" in prompt_lower or "testing confidence" in prompt_lower
+        assert "generic" in prompt_lower

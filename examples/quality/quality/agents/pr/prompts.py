@@ -229,9 +229,10 @@ pull request review.
 Your job:
 1. Merge findings that describe the same underlying issue, even when they are on slightly \
 different lines or worded differently. When you merge findings, keep the union of every \
-model that reported them in that comment's `models` list.
+model that reported them in that comment's `models` list and include every originating \
+finding's opaque `source_id` in the comment's `source_ids` list. Never invent a source ID.
 2. Drop duplicates and noise. Keep findings that are real, specific, and actionable.
-3. Produce a recommended review event and a brief overview summary.
+3. Produce a recommended review event and a brief, substantive overview summary.
 
 CRITICAL — where each finding goes:
 - Every retained finding MUST be emitted as its own entry in the `comments` array. This \
@@ -240,11 +241,13 @@ line. Do NOT enumerate findings in the `summary`.
 - `comments`: one entry per retained finding. Each entry needs a file `path` (relative to \
 repo root), the `line` number in the diff it applies to, a `severity` (info, low, medium, \
 high, or critical), a markdown `body` explaining the issue and the fix, and `models` \
-listing every model that reported it. Always provide a concrete `path` and `line` taken \
-from the originating finding — never omit them.
-- `summary`: a SHORT overview only (2-4 sentences) — overall assessment and noteworthy \
-themes. It must NOT restate the individual findings; those live in `comments`. Do not \
-return a summary that duplicates what's already in comments.
+listing every model that reported it. It also needs `source_ids`, listing the opaque source \
+IDs of every raw finding consolidated into the comment. Always provide a concrete `path` \
+and `line` taken from the originating finding — never omit them.
+- `summary`: a SHORT but descriptive overview (2-4 sentences) that states the overall \
+assessment, any material risk, and the level of test confidence. It must NOT restate \
+the individual findings; those live in `comments`. Do not return a generic summary \
+such as "looks good" or duplicate what's already in comments.
 - `event`:
   - REQUEST_CHANGES if any retained finding is high or critical severity.
   - COMMENT if there are non-blocking findings worth surfacing.

@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import operator
+import re
+import uuid
+from difflib import SequenceMatcher
+from hashlib import sha256
+from html import escape
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,11 +34,13 @@ class ReviewState(BaseModel):
     """LangGraph state for the PR review fan-out.
 
     Per-branch fields (cur_domain, cur_provider, cur_model, cur_prior) are read-only
-    inside branches and NEVER returned — attribution rides inside each finding/note dict.
-    Returning non-reducer fields from concurrent branches raises InvalidUpdateError.
+    inside branches and NEVER returned. Attribution rides inside findings, notes, and
+    branch execution records. Returning non-reducer fields from concurrent branches
+    raises InvalidUpdateError.
 
-    The reducer fields (findings, notes) are the only fields that branches return,
-    and their Annotated[list, operator.add] reducer allows concurrent writes to merge.
+    The reducer fields (findings, notes, branch_executions) are the only fields that
+    graph branches return, and their Annotated[list, operator.add] reducers allow
+    concurrent writes to merge.
 
     ctx and shell are NOT in state — they're passed via closure in build_graph() to
     avoid msgpack serialization errors during checkpointing.
@@ -61,6 +68,7 @@ class ReviewState(BaseModel):
     # Reducer fields — concurrent branches merge via operator.add
     findings: Annotated[list[dict[str, Any]], operator.add] = []
     notes: Annotated[list[dict[str, Any]], operator.add] = []
+    branch_executions: Annotated[list[dict[str, Any]], operator.add] = []
 
     # Output fields — set by synthesize_and_post, no reducer (runs once after join)
     local_artifact_path: str = ""
@@ -289,8 +297,8 @@ async def review_branch(ctx: AgentContext, shell: Shell, state: dict | ReviewSta
     Branch failure is isolated: exceptions preserve partial findings and append a
     failed=True note. Only asyncio.CancelledError propagates (for task cancellation).
 
-    Returns ONLY reducer fields (findings, notes) — attribution rides inside each dict.
-    Returning non-reducer fields raises InvalidUpdateError under concurrency.
+    Returns only reducer fields (findings, notes, branch_executions) for graph branch
+    states. Legacy direct dict callers retain their historical findings/notes shape.
     """
     import asyncio
 
@@ -318,6 +326,21 @@ async def review_branch(ctx: AgentContext, shell: Shell, state: dict | ReviewSta
     findings_list: list[dict[str, Any]] = []
     notes_list: list[dict[str, Any]] = []
 
+    def branch_result(*, succeeded: bool) -> dict[str, list]:
+        result = {"findings": findings_list, "notes": notes_list}
+        # Real graph branches receive ReviewState and publish execution metadata.
+        # Bare dict callers predate this reducer, so retain their two-key contract.
+        if isinstance(state, ReviewState) or "branch_executions" in state:
+            result["branch_executions"] = [
+                {
+                    "domain": domain,
+                    "provider": provider_name,
+                    "model": model,
+                    "succeeded": succeeded,
+                }
+            ]
+        return result
+
     @tool
     async def record_finding(path: str, line: int, severity: str, body: str) -> str:
         """Record a code issue tied to a specific file and line.
@@ -337,6 +360,7 @@ async def review_branch(ctx: AgentContext, shell: Shell, state: dict | ReviewSta
             sev = "medium"
 
         finding = {
+            "source_id": uuid.uuid4().hex,
             "domain": domain,
             "provider": provider_name,
             "model": model,
@@ -398,7 +422,7 @@ async def review_branch(ctx: AgentContext, shell: Shell, state: dict | ReviewSta
                 "failed": True,
             }
             notes_list.append(note)
-            return {"findings": findings_list, "notes": notes_list}
+            return branch_result(succeeded=False)
 
         # Build LLM for this branch's provider
         llm = ctx.llm(provider_name)
@@ -463,9 +487,8 @@ async def review_branch(ctx: AgentContext, shell: Shell, state: dict | ReviewSta
         notes_list.append(failed_note)
         ctx.progress(f"Branch {domain}/{provider_name} failed:\n{exc_msg}")
 
-    # Return ONLY reducer fields — no cur_domain/domain/model at top level
-    # Attribution rides inside each finding/note dict
-    return {"findings": findings_list, "notes": notes_list}
+    # Return only reducer fields; never return cur_domain/domain/model at top level.
+    return branch_result(succeeded=not any(note.get("failed") for note in notes_list))
 
 
 # -- Event resolution security constants -------------------------------------
@@ -559,8 +582,63 @@ def _effective_event(event: str, is_self_review: bool) -> str:
 # -- Synthesis and posting ----------------------------------------------------
 
 
+def _normalized_body(value: object) -> str:
+    """Normalize finding prose for conservative issue-equivalence checks."""
+    stopwords = {"a", "an", "before", "is", "it", "that", "the", "to"}
+    replacements = {"indexed": "index", "indexing": "index", "guards": "guard", "guarded": "guard"}
+    tokens = re.findall(r"[a-z0-9]+", str(value).lower())
+    return " ".join(replacements.get(token, token) for token in tokens if token not in stopwords)
+
+
+def _equivalent_findings(left: dict, right: dict) -> bool:
+    """Whether two raw findings conservatively represent the same issue."""
+    if (left.get("path"), _coerce_line(left.get("line"))) != (
+        right.get("path"),
+        _coerce_line(right.get("line")),
+    ):
+        return False
+    left_body = _normalized_body(left.get("body", ""))
+    right_body = _normalized_body(right.get("body", ""))
+    if not left_body or not right_body:
+        return False
+    if left_body == right_body or left_body in right_body or right_body in left_body:
+        return True
+    left_tokens = set(left_body.split())
+    right_tokens = set(right_body.split())
+    overlap = len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+    return overlap >= 0.75 and SequenceMatcher(None, left_body, right_body).ratio() >= 0.5
+
+
+def _normalize_finding_source_ids(findings: list[dict]) -> None:
+    """Assign stable per-input source IDs to legacy raw findings."""
+    used = {str(finding["source_id"]) for finding in findings if finding.get("source_id")}
+    for index, finding in enumerate(findings):
+        if finding.get("source_id"):
+            continue
+        material = "\0".join(
+            str(value)
+            for value in (
+                index,
+                finding.get("domain", ""),
+                finding.get("provider", ""),
+                finding.get("model", ""),
+                finding.get("path", ""),
+                finding.get("line", ""),
+                finding.get("severity", ""),
+                finding.get("body", ""),
+            )
+        )
+        source_id = f"legacy-{sha256(material.encode()).hexdigest()[:16]}"
+        suffix = 1
+        while source_id in used:
+            source_id = f"legacy-{sha256(material.encode()).hexdigest()[:16]}-{suffix}"
+            suffix += 1
+        finding["source_id"] = source_id
+        used.add(source_id)
+
+
 def _comments_from_findings(findings: list[dict]) -> list[dict]:
-    """Build comments directly from raw findings, merging by (path, line).
+    """Build comments directly from raw findings, merging by location.
 
     Used when synthesis returns no structured comments: the raw findings are
     posted instead of being lost. Findings on the same path+line are merged —
@@ -589,6 +667,7 @@ def _comments_from_findings(findings: list[dict]) -> list[dict]:
                 "severity": sev,
                 "body": body,
                 "models": [model] if model else [],
+                "source_ids": [f["source_id"]] if f.get("source_id") else [],
             }
             continue
         existing = merged[key]
@@ -598,7 +677,55 @@ def _comments_from_findings(findings: list[dict]) -> list[dict]:
             existing["body"] = f"{existing['body']}\n\n{body}" if existing["body"] else body
         if model and model not in existing["models"]:
             existing["models"].append(model)
+        source_id = f.get("source_id")
+        if source_id and source_id not in existing["source_ids"]:
+            existing["source_ids"].append(source_id)
     return list(merged.values())
+
+
+def _comments_from_distinct_findings(findings: list[dict]) -> list[dict]:
+    """Restore raw findings without combining unrelated issues at one location."""
+    return [
+        {
+            "path": finding.get("path") or "",
+            "line": _coerce_line(finding.get("line")),
+            "severity": str(finding.get("severity", "medium")).strip().lower(),
+            "body": finding.get("body", ""),
+            "models": [finding["model"]] if finding.get("model") else [],
+            "source_ids": [finding["source_id"]] if finding.get("source_id") else [],
+        }
+        for finding in findings
+    ]
+
+
+def _comments_from_equivalence_clusters(findings: list[dict]) -> list[dict]:
+    """Restore omitted findings, merging only conservative issue equivalents."""
+    clusters: list[list[dict]] = []
+    for finding in findings:
+        cluster = next(
+            (candidate for candidate in clusters if all(_equivalent_findings(finding, item) for item in candidate)),
+            None,
+        )
+        if cluster is None:
+            clusters.append([finding])
+        else:
+            cluster.append(finding)
+
+    comments: list[dict] = []
+    for cluster in clusters:
+        first = cluster[0]
+        severities = [str(item.get("severity", "medium")).strip().lower() for item in cluster]
+        comments.append(
+            {
+                "path": first.get("path") or "",
+                "line": _coerce_line(first.get("line")),
+                "severity": max(severities, key=lambda value: _SEVERITY_ORDER.get(value, 2)),
+                "body": "\n\n".join(_unique_models(item.get("body", "") for item in cluster)),
+                "models": _unique_models(item.get("model") for item in cluster),
+                "source_ids": _unique_models(item.get("source_id") for item in cluster),
+            }
+        )
+    return comments
 
 
 def _model_attrib(models: list[str]) -> str:
@@ -618,7 +745,217 @@ def _model_attrib(models: list[str]) -> str:
             uniq.append(m)
     if not uniq:
         return ""
-    return f" [{' | '.join(uniq)}]"
+    return f" [{' | '.join(_safe_model_id(model) for model in uniq)}]"
+
+
+def _unique_models(models) -> list[str]:
+    """Return non-empty model names once, preserving their input order."""
+    unique: list[str] = []
+    for model in models:
+        if model and model not in unique:
+            unique.append(model)
+    return unique
+
+
+def _successful_branch_models(
+    matrix: list, findings: list[dict], notes: list[dict], branch_executions: list[dict], diff: str
+) -> tuple[dict[str, list[str]], bool]:
+    """Resolve successful reviewer models and whether any branch succeeded.
+
+    Execution records are authoritative for graph runs, including clean branches.
+    Legacy/direct states infer execution from findings and notes, supplementing
+    from the matrix only for non-empty diffs and excluding explicit failures.
+    """
+    result: dict[str, list[str]] = {domain: [] for domain in DOMAINS}
+    if not diff:
+        return result, False
+
+    if branch_executions:
+        successful = [execution for execution in branch_executions if execution.get("succeeded")]
+        for execution in successful:
+            domain = execution.get("domain")
+            model = execution.get("model")
+            if domain in result and model:
+                result[domain].append(model)
+        return {domain: _unique_models(models) for domain, models in result.items()}, bool(successful)
+
+    failed = {(note.get("domain"), note.get("provider"), note.get("model")) for note in notes if note.get("failed")}
+    successful_items = [*findings, *(note for note in notes if not note.get("failed"))]
+    for item in successful_items:
+        domain = item.get("domain")
+        model = item.get("model")
+        if domain in result and model:
+            result[domain].append(model)
+
+    # Legacy clean states have no per-branch records. A configured matrix on a
+    # non-empty diff represents the domain cross-product, except combinations
+    # explicitly identified by failed notes.
+    for domain in DOMAINS:
+        for provider, model in matrix:
+            if (domain, provider, model) not in failed:
+                result[domain].append(model)
+
+    models_by_domain = {domain: _unique_models(models) for domain, models in result.items()}
+    return models_by_domain, any(models_by_domain.values())
+
+
+def _safe_model_id(model: object) -> str:
+    """Render a model id as one Markdown-safe line."""
+    from quality import _redact as redact_module
+
+    value = redact_module.redact_secrets(str(model))
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.replace("---", "- - -")
+    value = escape(value, quote=False).replace("&lt;REDACTED&gt;", "<REDACTED>")
+    for char in ("\\", "`", "*", "_", "[", "]", "|"):
+        value = value.replace(char, f"\\{char}")
+    return value
+
+
+def _render_review_footer(models_by_domain: dict[str, list[str]]) -> str:
+    """Render deterministic top-level reviewer attribution."""
+    lines = ["", "---", ""]
+    for domain in DOMAINS:
+        models = models_by_domain.get(domain, [])
+        value = " | ".join(_safe_model_id(model) for model in models) if models else "(none recorded)"
+        lines.append(f"**{domain.title()} reviewer models:** {value}")
+    lines.extend(["", "Posted by switchplane-quality"])
+    return "\n".join(lines)
+
+
+def _repair_comment_models(comments: list[dict], findings: list[dict]) -> None:
+    """Replace synthesis attribution with reviewer models backed by raw findings.
+
+    Match raw contributors by exact path/line, then path, then all findings. This
+    both rejects invented synthesis-model attribution and recovers omitted models.
+    """
+
+    def normalized_body(value: object) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", str(value).lower()))
+
+    for comment in comments:
+        path = comment.get("path") or ""
+        line = _coerce_line(comment.get("line"))
+        candidates = [
+            finding
+            for finding in findings
+            if (finding.get("path") or "") == path and _coerce_line(finding.get("line")) == line
+        ]
+        if not candidates and path:
+            candidates = [finding for finding in findings if (finding.get("path") or "") == path]
+        if not candidates:
+            candidates = findings
+        supported = _unique_models(finding.get("model") for finding in candidates)
+        retained = [model for model in _unique_models(comment.get("models", [])) if model in supported]
+        if not retained:
+            comment["models"] = supported
+            continue
+
+        comment_body = normalized_body(comment.get("body", ""))
+        similar_models = _unique_models(
+            finding.get("model")
+            for finding in candidates
+            if comment_body
+            and (
+                normalized_body(finding.get("body", "")) == comment_body
+                or SequenceMatcher(None, normalized_body(finding.get("body", "")), comment_body).ratio() >= 0.85
+            )
+        )
+        comment["models"] = similar_models or retained
+
+
+def _validate_sourced_comments(comments: list[dict], findings: list[dict]) -> list[dict]:
+    """Reconstruct synthesized comments from their cited raw findings."""
+    findings_by_id = {finding["source_id"]: finding for finding in findings if finding.get("source_id")}
+    validated: list[dict] = []
+    for comment in comments:
+        source_ids = _unique_models(comment.get("source_ids", []))
+        valid_ids = [source_id for source_id in source_ids if source_id in findings_by_id]
+        if not valid_ids:
+            continue
+        cited = [findings_by_id[source_id] for source_id in valid_ids]
+        if not all(_equivalent_findings(cited[0], finding) for finding in cited[1:]):
+            validated.extend(_comments_from_distinct_findings(cited))
+            continue
+        sources = [
+            finding
+            for finding in findings_by_id.values()
+            if any(_equivalent_findings(finding, cited_finding) for cited_finding in cited)
+        ]
+        source_ids = _unique_models(finding.get("source_id") for finding in sources)
+        severities = [str(finding.get("severity", "medium")).strip().lower() for finding in sources]
+        severity = max(severities, key=lambda value: _SEVERITY_ORDER.get(value, 2))
+        raw_bodies = _unique_models(finding.get("body", "") for finding in sources)
+        synthesized_body = str(comment.get("body", ""))
+        normalized_synthesized = _normalized_body(synthesized_body)
+        body_matches_source = bool(raw_bodies and normalized_synthesized) and all(
+            _normalized_body(body) == normalized_synthesized
+            or (
+                SequenceMatcher(None, _normalized_body(body), normalized_synthesized).ratio() >= 0.95
+                and 0.9 <= len(normalized_synthesized) / len(_normalized_body(body)) <= 1.1
+            )
+            for body in raw_bodies
+            if body
+        )
+        validated.append(
+            {
+                "path": cited[0].get("path") or "",
+                "line": _coerce_line(cited[0].get("line")),
+                "severity": severity,
+                "body": synthesized_body if body_matches_source else "\n\n".join(raw_bodies),
+                "models": _unique_models(finding.get("model") for finding in sources),
+                "source_ids": source_ids,
+            }
+        )
+    represented = {
+        source_id for comment in validated for source_id in comment.get("source_ids", []) if source_id in findings_by_id
+    }
+    missing = [finding for source_id, finding in findings_by_id.items() if source_id not in represented]
+    validated.extend(_comments_from_equivalence_clusters(missing))
+    return validated
+
+
+def _close_untrusted_markdown(value: object) -> str:
+    """Neutralize structures that could absorb deterministic provenance Markdown."""
+    text = str(value)
+    text = escape(text, quote=False)
+    return re.sub(r"(?m)^( {0,3})(`{3,}|~{3,})", r"\1\\\2", text)
+
+
+def _descriptive_summary(summary: object, findings: list[dict]) -> str:
+    """Ensure the summary states material risk and test confidence."""
+    text = str(summary or "").strip()
+    lower = text.lower()
+    has_risk = "material risk" in lower
+    has_confidence = "test confidence" in lower or "testing confidence" in lower
+    sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+    useful = len(text) >= 60 and len(text.split()) >= 9 and bool(sentences)
+    contextual = any(word in lower for word in ("change", "finding", "review", "code", "coverage", "test"))
+    if has_risk and has_confidence and useful and contextual:
+        return _close_untrusted_markdown(text)
+
+    severities = [str(finding.get("severity", "medium")).strip().lower() for finding in findings]
+    blocking = any(severity in _BLOCKING_SEVERITIES for severity in severities)
+    risk = "blocking material risk" if blocking else "bounded material risk"
+    assessment = (
+        f"Reviewer evidence indicates {risk}. Test confidence is limited to the changed code "
+        "and test evidence available in the pull request; this review did not execute the change."
+    )
+    if len(text.split()) >= 5:
+        assessment = f"{text}\n\n{assessment}"
+    return _close_untrusted_markdown(assessment)
+
+
+def _render_inline_body(comment: dict) -> str:
+    """Render a complete inline finding with reviewer and origin attribution."""
+    models = comment.get("models", [])
+    value = " | ".join(_safe_model_id(model) for model in models) if models else "(none recorded)"
+    return (
+        f"{_close_untrusted_markdown(comment.get('body', ''))}\n\n---\n"
+        f"Validated/recovered contributing models: {value}\n\n"
+        "Origin: switchplane-quality\n\n"
+        "**quality/review**"
+    )
 
 
 def _coerce_line(line: object) -> int | None:
@@ -673,15 +1010,15 @@ def _render_unpostable(comments: list[dict]) -> str:
     lines = ["", "---", "", "### Additional findings (not on changed lines)", ""]
     for c in comments:
         raw_path = c.get("path")
-        path = raw_path or "(general)"
+        path = _close_untrusted_markdown(raw_path or "(general)")
         loc = path
         line = _coerce_line(c.get("line"))
         if raw_path and line is not None:
             loc += f":{line}"
-        sev = c.get("severity", "medium")
+        sev = _close_untrusted_markdown(c.get("severity", "medium"))
         attrib = _model_attrib(c.get("models", [])).strip()
         suffix = f" {attrib}" if attrib else ""
-        lines.append(f"- **{loc}** [{sev}] — {c.get('body', '')}{suffix}")
+        lines.append(f"- **{loc}** [{sev}] — {_close_untrusted_markdown(c.get('body', ''))}{suffix}")
     return "\n".join(lines)
 
 
@@ -704,7 +1041,7 @@ def _render_notes(notes: list[dict]) -> str:
     for n in notes:
         domain = n.get("domain", "")
         provider = n.get("provider", "")
-        body = n.get("body", "")
+        body = _close_untrusted_markdown(n.get("body", ""))
         failed = n.get("failed", False)
         prefix = f"**{domain}/{provider}**:"
         if failed:
@@ -766,12 +1103,26 @@ async def _existing_comment_lines(
 
 
 def _persist_baseline(
-    ctx, memory_module, comments, findings, *, runtime_dir, repo, number, head_sha, summary, local
+    ctx,
+    memory_module,
+    comments,
+    findings,
+    *,
+    runtime_dir,
+    repo,
+    number,
+    head_sha,
+    summary,
+    local,
+    prior_findings=None,
+    failed_domains=None,
 ) -> None:
     """Build domain attribution and persist baseline for follow-up runs.
 
     Implements the three-tier attribution fallback: exact (path, line), path-level, all-domains.
     """
+    from quality import _redact as redact_module
+
     # Build exact-line attribution map and path-level fallback
     domains_by_loc: dict[tuple, set[str]] = {}
     domains_by_path: dict[str, set[str]] = {}
@@ -806,18 +1157,52 @@ def _persist_baseline(
                 "path": path,
                 "line": line,
                 "severity": c.get("severity", "medium"),
-                "title": c.get("body", "")[:80],
+                "title": redact_module.redact_secrets(c.get("body", ""))[:80],
             }
         )
+    retained = []
+    failed_domain_set = set(failed_domains or [])
+    for prior in prior_findings or []:
+        domains = set(prior.get("domains") or ([prior.get("domain")] if prior.get("domain") else []))
+        preserved_domains = sorted(domains & failed_domain_set)
+        if preserved_domains:
+            retained.append(
+                {
+                    **prior,
+                    "domains": preserved_domains,
+                    "domain": preserved_domains[0],
+                }
+            )
+
+    existing_keys = {
+        (finding.get("path"), _coerce_line(finding.get("line")), tuple(finding.get("domains") or []))
+        for finding in persisted
+    }
+    for finding in retained:
+        key = (finding.get("path"), _coerce_line(finding.get("line")), tuple(finding.get("domains") or []))
+        if key not in existing_keys:
+            persisted.append(finding)
+
     memory_module.save_baseline(
         runtime_dir,
         repo=repo,
         number=number,
         head_sha=head_sha,
-        summary=summary,
+        summary=redact_module.redact_secrets(summary),
         findings=persisted,
         local=local,
     )
+
+
+def _preserved_failed_domain_findings(prior_baseline: dict | None, failed_domains: set[str]) -> list[dict]:
+    """Project prior mixed-domain findings onto only the domains that failed."""
+    preserved = []
+    for finding in (prior_baseline or {}).get("findings", []):
+        domains = set(finding.get("domains") or ([finding.get("domain")] if finding.get("domain") else []))
+        retained_domains = sorted(domains & failed_domains)
+        if retained_domains:
+            preserved.append({**finding, "domains": retained_domains, "domain": retained_domains[0]})
+    return preserved
 
 
 async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | ReviewState) -> dict:
@@ -858,16 +1243,43 @@ async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | Rev
     authed_user = _state_accessor(state, "authed_user", "")
     local = _state_accessor(state, "local", False)
     matrix = _state_accessor(state, "matrix", [])
+    branch_executions = _state_accessor(state, "branch_executions", [])
+    _normalize_finding_source_ids(findings)
+    failed_domains = {
+        execution.get("domain")
+        for execution in branch_executions
+        if not execution.get("succeeded") and execution.get("domain")
+    }
+    failed_domains.update(note.get("domain") for note in notes if note.get("failed") and note.get("domain"))
+    prior_baseline = None
+    if failed_domains:
+        try:
+            prior_path = memory_module.baseline_path(ctx.runtime_dir, repo, number, local=local)
+        except TypeError:
+            # Some embedding/test adapters expose the older keyword-only or
+            # no-local seam; production memory.baseline_path uses the first form.
+            try:
+                prior_path = memory_module.baseline_path(ctx.runtime_dir, repo=repo, number=number, local=local)
+            except TypeError:
+                prior_path = memory_module.baseline_path(ctx.runtime_dir, repo, number)
+        prior_baseline = memory_module.load_baseline(prior_path)
+    models_by_domain, any_branch_succeeded = _successful_branch_models(matrix, findings, notes, branch_executions, diff)
+    review_footer = _render_review_footer(models_by_domain)
 
-    # Total reviewer outage: every branch raised, so we have failure notes but
-    # zero findings. That is NOT a clean PR — posting "review complete" would
-    # mislead and persist an empty baseline. Surface it as an error.
-    if notes and all(n.get("failed") for n in notes) and not findings:
-        failed = ", ".join(f"{n['domain']}/{n['provider']}" for n in notes if n.get("failed"))
+    # Authoritative execution records can prove an outage without failure notes.
+    # Legacy states require failure notes because clean branches had no metadata.
+    authoritative_outage = bool(branch_executions) and not any_branch_succeeded
+    legacy_outage = bool(notes) and not any_branch_succeeded
+    if (authoritative_outage or legacy_outage) and not findings:
+        failures = [execution for execution in branch_executions if not execution.get("succeeded")] or [
+            note for note in notes if note.get("failed")
+        ]
+        failed = ", ".join(f"{item.get('domain', '?')}/{item.get('provider', '?')}" for item in failures)
         ctx.progress("All reviewer branches failed — review could not be completed")
         return {"error": f"All reviewer branches failed ({failed}); no review performed."}
 
-    if not findings and not notes:
+    only_failure_notes = bool(notes) and all(note.get("failed") for note in notes)
+    if not findings and (not notes or only_failure_notes):
         # Empty provider matrix: no reviewers ran because no provider has an api_key.
         # This is NOT a clean PR — posting "no issues found" or persisting an empty
         # baseline would misrepresent the review state. Surface as configuration error.
@@ -878,15 +1290,31 @@ async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | Rev
                 "[llm] or at least one [llm.providers.<name>] entry in ~/.quality/config.toml"
             }
 
-        # Clean PR: reviewers ran and found nothing
+        # Clean PR: qualify the claim when only some branches completed.
+        partial_outage = any_branch_succeeded and (
+            any(not execution.get("succeeded") for execution in branch_executions)
+            or any(note.get("failed") for note in notes)
+        )
+        if partial_outage:
+            clean_summary = (
+                "Successful reviewer branches found no issues, but review coverage was incomplete because "
+                "one or more reviewer branches failed."
+            )
+        else:
+            clean_summary = (
+                "No quality or security issues found. The reviewer matrix identified no material risk "
+                "in the changed code; test confidence is limited to the evidence available in the pull request."
+            )
         if local:
             ctx.progress("No findings (local mode)")
-            # Write empty artifact
             runtime_dir = ctx.runtime_dir
             artifact_dir = runtime_dir / "reviews" / repo
             mkdir_private(artifact_dir, runtime_dir)
             artifact_path = artifact_dir / f"pr-{number}.md"
-            artifact_path.write_text(f"# PR #{number}: {repo}\n\n✅ No quality or security issues found.\n")
+            artifact = f"# PR #{number}: {repo}\n\n## Review summary\n\n{clean_summary}"
+            artifact += _render_notes(notes)
+            artifact += f"{review_footer}\n"
+            artifact_path.write_text(redact_module.redact_secrets(artifact))
             artifact_path.chmod(0o600)
 
             # Persist an empty baseline (same as GitHub branch below)
@@ -895,20 +1323,24 @@ async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | Rev
                 repo=repo,
                 number=number,
                 head_sha=head_sha,
-                summary="No quality or security issues found.",
-                findings=[],
+                summary=clean_summary,
+                findings=_preserved_failed_domain_findings(prior_baseline, failed_domains),
                 local=local,
             )
             return {"local_artifact_path": str(artifact_path), "findings_written": 0}
         else:
             ctx.progress("No findings — submitting approval")
             event = _effective_event("APPROVE", is_self_review)
-            body = "No quality or security issues found."
+            body = f"## Review summary\n\n{clean_summary}"
+            body += _render_notes(notes)
+            body += review_footer
+            body = redact_module.redact_secrets(body)
             try:
                 await gh_module.submit_pr_review(shell, repo, number, event, body)
             except Exception as exc:
                 exc_msg = redact_module.redact_secrets(str(exc))
                 ctx.progress(f"Failed to submit review: {exc_msg}")
+                return {"error": f"Failed to submit {event} review: {exc_msg}"}
 
             # Persist an empty baseline
             runtime_dir = ctx.runtime_dir
@@ -917,8 +1349,8 @@ async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | Rev
                 repo=repo,
                 number=number,
                 head_sha=head_sha,
-                summary="No quality or security issues found.",
-                findings=[],
+                summary=clean_summary,
+                findings=_preserved_failed_domain_findings(prior_baseline, failed_domains),
                 local=local,
             )
             return {}
@@ -946,7 +1378,7 @@ Consolidate these into a single review: merge findings that describe the same is
 keep findings that are real and actionable, drop noise. Emit the result as:
 - `summary`: 2-4 sentence overview (no enumeration of findings)
 - `event`: APPROVE | REQUEST_CHANGES | COMMENT
-- `comments`: array of {{path, line, severity, body, models}}
+- `comments`: array of {{path, line, severity, body, models, source_ids}}
 """
 
     # Create a Pydantic model for structured output
@@ -959,6 +1391,7 @@ keep findings that are real and actionable, drop noise. Emit the result as:
         severity: str = PydField("medium", description="info, low, medium, high, or critical")
         body: str = PydField("", description="Markdown comment explaining the issue")
         models: list[str] = PydField(default_factory=list, description="Models that reported this")
+        source_ids: list[str] = PydField(default_factory=list, description="Opaque raw finding IDs consolidated here")
 
     class SynthResult(PydanticBaseModel):
         summary: str = PydField("", description="Markdown review-body summary")
@@ -994,32 +1427,34 @@ keep findings that are real and actionable, drop noise. Emit the result as:
         synthesized = {"summary": "", "event": "COMMENT", "comments": []}
 
     comments = synthesized.get("comments", [])
-    summary = synthesized.get("summary", "")
+    summary = _descriptive_summary(synthesized.get("summary", ""), findings)
     event = synthesized.get("event")
 
-    # Redact secrets from synthesis output immediately (before any use)
-    # All downstream consumers (artifact, review body, baseline) are then safe by construction
-    summary = redact_module.redact_secrets(summary)
     for c in comments:
-        if "body" in c:
-            c["body"] = redact_module.redact_secrets(c["body"])
         # Normalize severity to lowercase and strip whitespace (model returns untrusted case)
         if "severity" in c:
             c["severity"] = str(c["severity"]).strip().lower()
 
-    # Defensive fallback: synthesis sometimes returns no structured comments
+    raw_has_source_ids = any(finding.get("source_id") for finding in findings)
+    if raw_has_source_ids:
+        comments = _validate_sourced_comments(comments, findings)
+
+    # Defensive fallback: synthesis sometimes returns no validated comments.
     if not comments and findings:
         ctx.progress("Synthesis returned no comments — deriving from raw findings")
         comments = _comments_from_findings(findings)
-        # Redact and normalize fallback-generated comments too
         for c in comments:
-            if "body" in c:
-                c["body"] = redact_module.redact_secrets(c["body"])
             if "severity" in c:
                 c["severity"] = str(c["severity"]).strip().lower()
 
+    if not raw_has_source_ids:
+        # Legacy/direct states predate source IDs and use location/body recovery.
+        _repair_comment_models(comments, findings)
+
     # Resolve event (untrusted model output)
-    event = _effective_event(_resolve_event(event, comments), is_self_review)
+    resolved_event = _resolve_event(event, comments)
+    raw_event = _synth_event(findings)
+    event = _effective_event(max(resolved_event, raw_event, key=_EVENT_STRICTNESS.get), is_self_review)
 
     # Parse commentable lines from the diff (needed for both local and GitHub modes)
     commentable = gh_module.commentable_lines(diff)
@@ -1031,30 +1466,26 @@ keep findings that are real and actionable, drop noise. Emit the result as:
         mkdir_private(artifact_dir, runtime_dir)
         artifact_path = artifact_dir / f"pr-{number}.md"
 
-        # Build markdown artifact
         lines = [f"# PR #{number}: {repo}\n"]
         lines.append(f"**Event**: {event}\n")
-        if summary:
-            lines.append(f"## Summary\n\n{summary}\n")
+        lines.append(
+            f"## Review summary\n\n{summary or 'Review synthesis was unavailable; raw reviewer findings follow.'}\n"
+        )
         if comments:
             lines.append(f"## Findings ({len(comments)})\n")
             for c in comments:
-                sev = c.get("severity", "medium")
-                path = c.get("path", "")
+                sev = _close_untrusted_markdown(c.get("severity", "medium"))
+                path = _close_untrusted_markdown(c.get("path", ""))
                 line = c.get("line")
-                body = c.get("body", "")
-                models = c.get("models", [])
-                attrib = _model_attrib(models) if models else ""
-                lines.append(f"\n### {sev.upper()}: {path}:{line}\n\n{body}\n")
-                if attrib:
-                    lines.append(f"\n{attrib}\n")
+                lines.append(f"\n### {sev.upper()}: {path}:{line}\n\n{_render_inline_body(c)}\n")
 
         # Render reviewer notes (including failures) — partial outage must be disclosed
         notes_section = _render_notes(notes)
         if notes_section:
             lines.append(notes_section)
 
-        artifact_path.write_text("".join(lines))
+        lines.append(review_footer)
+        artifact_path.write_text(redact_module.redact_secrets("".join(lines)))
         artifact_path.chmod(0o600)
         ctx.progress(f"Wrote artifact: {artifact_path}")
 
@@ -1070,6 +1501,8 @@ keep findings that are real and actionable, drop noise. Emit the result as:
             head_sha=head_sha,
             summary=summary,
             local=local,
+            prior_findings=(prior_baseline or {}).get("findings", []),
+            failed_domains=failed_domains,
         )
 
         return {"local_artifact_path": str(artifact_path), "findings_written": len(comments)}
@@ -1102,14 +1535,7 @@ keep findings that are real and actionable, drop noise. Emit the result as:
             skipped += 1
             continue
 
-        body = c.get("body", "")
-        attrib = _model_attrib(c.get("models", []))
-        if attrib:
-            body = f"{body}\n\n---\n{attrib}"
-
-        # Redact secrets from the body before posting
-        body = redact_module.redact_secrets(body)
-        body += "\n\n**quality/review**"
+        body = redact_module.redact_secrets(_render_inline_body(c))
 
         try:
             await gh_module.create_pr_review_comment(shell, repo, number, body, path, line, head_sha)
@@ -1124,10 +1550,12 @@ keep findings that are real and actionable, drop noise. Emit the result as:
         ctx.progress(f"Skipped {skipped} existing comment(s)")
 
     # Build review body
-    review_body = summary or "Review complete."
+    review_body = f"## Review summary\n\n{summary or 'Review complete.'}"
     review_body += _render_unpostable(unpostable)
     review_body += _render_notes(notes)
-    # Redact secrets from the review body before posting
+    review_body += review_footer
+    # Redact only after all generated and deterministic output is rendered so
+    # attribution metadata and origin markers cannot introduce a late leak.
     review_body = redact_module.redact_secrets(review_body)
 
     # Submit the consolidated review
@@ -1155,6 +1583,8 @@ keep findings that are real and actionable, drop noise. Emit the result as:
         head_sha=head_sha,
         summary=summary,
         local=local,
+        prior_findings=(prior_baseline or {}).get("findings", []),
+        failed_domains=failed_domains,
     )
 
     return {"posted_comments": posted, "failed_comments": failed, "findings_written": posted}

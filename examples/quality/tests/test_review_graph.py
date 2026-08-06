@@ -104,7 +104,7 @@ class TestReviewState:
 
         hints = get_type_hints(ReviewState, include_extras=True)
 
-        # Assert specific reducer fields exist: findings and notes
+        # Assert every branch-owned list has an additive reducer.
         reducer_fields = []
         for name, hint in hints.items():
             if get_origin(hint) is Annotated:
@@ -114,6 +114,9 @@ class TestReviewState:
 
         assert "findings" in reducer_fields, "ReviewState must have a 'findings' field with operator.add reducer"
         assert "notes" in reducer_fields, "ReviewState must have a 'notes' field with operator.add reducer"
+        assert "branch_executions" in reducer_fields, (
+            "ReviewState must reduce authoritative success/failure execution records across fan-out branches"
+        )
 
 
 class TestRouting:
@@ -273,12 +276,16 @@ class TestBranchExecution:
             "number": 1,
             "diff": "diff",
             "worktree_path": "/wt",
+            "branch_executions": [],
         }
 
-        await review_branch(ctx, shell, state)
+        result = await review_branch(ctx, shell, state)
 
         assert initial_called["value"], "Branch must call initial_prompt when no baseline exists"
         assert not followup_called["value"], "Branch must NOT call followup_prompt when no baseline exists"
+        assert result["branch_executions"] == [
+            {"domain": "quality", "provider": "alpha", "model": "model-a", "succeeded": True}
+        ]
 
     @pytest.mark.asyncio
     async def test_branch_uses_followup_prompt_when_baseline_has_prior_findings(self, monkeypatch):
@@ -670,6 +677,7 @@ class TestRecordingTools:
         assert finding["line"] == 42, f"line mismatch: {finding}"
         assert finding["severity"] == "high", f"severity mismatch: {finding}"
         assert finding["body"] == "Test finding", f"body mismatch: {finding}"
+        assert finding["source_id"], "raw findings need opaque IDs for synthesis provenance validation"
 
     @pytest.mark.asyncio
     async def test_record_finding_coerces_invalid_severity_to_medium(self, monkeypatch):
@@ -1027,6 +1035,7 @@ class TestEdgeCases:
             "number": 1,
             "diff": "diff",
             "worktree_path": "/wt",
+            "branch_executions": [],
         }
 
         result = await review_branch(ctx, shell, state)
@@ -1045,6 +1054,9 @@ class TestEdgeCases:
         assert failed_note["domain"] == "security", "Failed note must include domain"
         assert failed_note["model"] == "model-a", "Failed note must include model"
         assert "RuntimeError" in failed_note["body"], "Failed note body must mention exception type"
+        assert result["branch_executions"] == [
+            {"domain": "security", "provider": "alpha", "model": "model-a", "succeeded": False}
+        ]
 
         # Assert ctx.progress was called to inform the user
         assert any("failed" in msg.lower() for msg in ctx.progress_calls), (
