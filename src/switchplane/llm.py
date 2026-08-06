@@ -164,6 +164,7 @@ def build_llm(
 
 _MAX_TOOL_RESULT_CHARS = 8_000
 _MAX_REPEAT_CALLS = 3
+_TRUNCATION_MARKER = "\n\n[...truncated: content exceeded context window...]"
 
 
 def extract_response_text(content) -> str:
@@ -204,6 +205,7 @@ async def run_tool_loop(
     max_retries: int = 1,
     truncate_results: bool = True,
     progress_every: int | None = None,
+    max_turns: int = 200,
 ):
     """Drive an LLM tool-calling loop until the model produces a final answer.
 
@@ -228,6 +230,11 @@ async def run_tool_loop(
         Whether to truncate long tool results to _MAX_TOOL_RESULT_CHARS.
     progress_every:
         If set, emit a progress message every N turns. None disables.
+    max_turns:
+        Maximum number of tool-calling turns before stopping. Default is 200,
+        generous enough for legitimate multi-step work while bounding runaway
+        loops on attacker-influenced input. On hitting the cap, returns the
+        last response without raising (preserving any findings recorded so far).
     """
     from langchain_core.messages.utils import trim_messages
 
@@ -236,14 +243,45 @@ async def run_tool_loop(
     repeat_count = 0
 
     while True:
-        trimmed = trim_messages(
-            messages,
-            max_tokens=context_window(model_name),
-            token_counter="approximate",
-            strategy="last",
-            include_system=True,
-            start_on="human",
-        )
+        # The conversation's instructions live in the leading message(s) before the
+        # first AI turn. start_on="human" alone can discard them (a tool-only tail has
+        # no human message to anchor to, yielding []). Pin the leading block, trim the
+        # rest, and always keep the anchor.
+        if messages:
+            anchor = messages[0]  # the initial HumanMessage / prompt
+            window = context_window(model_name)
+            # Bound the anchor itself — the tail is budgeted by trim_messages but the anchor
+            # is not, and the reviewer's prompt embeds an unbounded, attacker-controlled diff.
+            # Approximate 4 chars/token to match trim_messages(token_counter="approximate").
+            # Handle both dict messages (tests) and LangChain Message objects (production).
+            if isinstance(anchor, dict):
+                content = anchor.get("content", "")
+            else:
+                content = anchor.content if isinstance(anchor.content, str) else str(anchor.content)
+            max_chars = window * 4 - len(_TRUNCATION_MARKER)
+            if len(content) > max_chars:
+                # Truncate from the tail: instructions lead the prompt, the diff trails it.
+                if isinstance(anchor, dict):
+                    anchor = {**anchor, "content": content[:max_chars] + _TRUNCATION_MARKER}
+                else:
+                    anchor = anchor.model_copy(update={"content": content[:max_chars] + _TRUNCATION_MARKER})
+            tail = trim_messages(
+                messages[1:],
+                max_tokens=window,
+                token_counter="approximate",
+                strategy="last",
+                include_system=True,
+                start_on="ai",  # tail must begin at an AI turn, not a dangling ToolMessage
+            )
+            # If the (possibly-truncated) anchor already fills the window, drop the tail so the
+            # total stays within bound — the prompt matters more than stale tool history.
+            anchor_content = anchor.get("content", "") if isinstance(anchor, dict) else str(anchor.content)
+            if len(anchor_content) // 4 >= window:
+                trimmed = [anchor]
+            else:
+                trimmed = [anchor, *tail]
+        else:
+            trimmed = []
         messages.clear()
         messages.extend(trimmed)
 
@@ -257,6 +295,11 @@ async def run_tool_loop(
             return response
 
         turn += 1
+
+        # Check turn cap before processing tool calls
+        if turn >= max_turns:
+            ctx.progress(f"{label}: reached {max_turns}-turn cap, stopping.")
+            return response
 
         # Detect repeated identical tool-call sequences.
         sig = json.dumps(

@@ -14,9 +14,7 @@ import pytest
 
 from switchplane import Shell
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("git") is None, reason="git not on PATH"
-)
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
 
 
 @pytest.fixture
@@ -99,9 +97,7 @@ async def test_create_pr_worktree_detaches_at_pr_head(git_repo, tmp_path):
     repo_path, pr_sha = git_repo
     shell = Shell(allowed_paths=[tmp_path], allowed_commands=["git"], timeout=10.0)
 
-    worktree_path, returned_sha = await create_pr_worktree(
-        shell, repo_path, 1, "task.123"
-    )
+    worktree_path, returned_sha = await create_pr_worktree(shell, repo_path, 1, "task.123")
 
     # Verify the worktree was created
     assert worktree_path.exists()

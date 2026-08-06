@@ -120,7 +120,13 @@ def _format_prior(baseline: dict[str, Any] | None, domain: str) -> str:
     if baseline is None or "findings" not in baseline:
         return ""
 
-    findings = [f for f in baseline.get("findings", []) if f.get("domain") == domain]
+    def _matches(f, domain):
+        """Match finding against domain, supporting both new 'domains' list and old 'domain' string."""
+        if "domains" in f:
+            return domain in f["domains"]
+        return f.get("domain") == domain
+
+    findings = [f for f in baseline.get("findings", []) if _matches(f, domain)]
     if not findings:
         return ""
 
@@ -173,9 +179,7 @@ findings and stop."""
     return f"{system}\n\n{user}"
 
 
-def followup_prompt(
-    domain: str, repo: str, number: int, worktree_path: str, diff: str, prior_findings: str
-) -> str:
+def followup_prompt(domain: str, repo: str, number: int, worktree_path: str, diff: str, prior_findings: str) -> str:
     """Build a follow-up review prompt (subsequent review of an updated PR).
 
     The key difference from initial_prompt is that it includes the prior findings

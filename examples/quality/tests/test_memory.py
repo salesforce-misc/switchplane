@@ -205,14 +205,10 @@ class TestSaveBaseline:
         from quality.agents.pr.memory import load_baseline, save_baseline
 
         # Write initial baseline
-        path1 = save_baseline(
-            tmp_path, repo="github.com/org/repo", number=9, head_sha="v1", summary="old", findings=[]
-        )
+        path1 = save_baseline(tmp_path, repo="github.com/org/repo", number=9, head_sha="v1", summary="old", findings=[])
 
         # Overwrite with new data
-        path2 = save_baseline(
-            tmp_path, repo="github.com/org/repo", number=9, head_sha="v2", summary="new", findings=[]
-        )
+        path2 = save_baseline(tmp_path, repo="github.com/org/repo", number=9, head_sha="v2", summary="new", findings=[])
 
         assert path1 == path2
         loaded = load_baseline(path2)

@@ -43,6 +43,8 @@ from typing import Any
 
 import structlog
 
+from quality._paths import mkdir_private
+
 logger = structlog.get_logger()
 
 
@@ -150,7 +152,7 @@ def save_baseline(
         OSError: If the write fails (e.g. disk full, permission denied).
     """
     path = baseline_path(root, repo, number, local=local)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    mkdir_private(path.parent, root)
 
     payload = {
         "head_sha": head_sha,

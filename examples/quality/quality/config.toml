@@ -17,4 +17,4 @@ model = "gpt-5.5"
 allowed_hosts = ["github.com"]
 
 [logging]
-level = "INFO"
+level = "WARNING"

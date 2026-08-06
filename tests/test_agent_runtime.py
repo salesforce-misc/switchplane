@@ -1469,9 +1469,7 @@ class TestAgentContextLLM:
         )
 
         def _boom(*args, **kwargs):
-            raise ImportError(
-                "LLM support requires langchain_core. Install with: pip install switchplane[llm]"
-            )
+            raise ImportError("LLM support requires langchain_core. Install with: pip install switchplane[llm]")
 
         import switchplane.llm as llm_mod
 

@@ -133,7 +133,6 @@ class TestLoadConfig:
         assert cfg.llm.model == "gpt-4"  # user override
         assert cfg.llm.api_key == "sk-user"  # user addition
 
-
     def test_stale_agents_section_warns(self, tmp_path):
         """Silence is the wrong failure mode for a removed feature, so
         load_config warns when it sees a section that no longer applies."""

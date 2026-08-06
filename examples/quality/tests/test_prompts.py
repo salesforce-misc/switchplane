@@ -6,7 +6,6 @@ worktree path or prior findings).
 """
 
 
-
 class TestDomains:
     """Tests for DOMAINS and DOMAIN_PROMPTS."""
 

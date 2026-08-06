@@ -16,27 +16,31 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from conftest import FakeAgentContext as BaseAgentContext
+from conftest import FakeShell as BaseShell
 
-class FakeAgentContext:
-    """Hand-written fake AgentContext for recording calls.
 
-    Captures llm(), progress(), and config reads so tests can assert which
-    provider, model, and prompt variant each branch used. This prevents
-    tautological tests that merely compare the implementation to itself.
+class FakeAgentContext(BaseAgentContext):
+    """Test-specific subclass that records llm() calls for assertions.
+
+    Extends the shared FakeAgentContext from conftest.py with recording state
+    for llm() and progress() calls, so tests can assert which provider, model,
+    and prompt variant each branch used.
     """
 
-    def __init__(self, providers: list[str], config: dict):
-        self.providers = providers
-        self.config = config
-        self.runtime_dir = Mock(return_value="/fake/runtime")
-        self.task_id = "test-task-123"
-        self.checkpointer = None
+    def __init__(self, providers: list[str], config: dict, runtime_dir_path=None):
+        super().__init__(config=config, runtime_dir_path=runtime_dir_path)
+        self._providers_override = providers
         self.is_cancelled = False
 
         # Recording state
         self.llm_calls: list[tuple[str | None, str | None]] = []  # (provider_name, model_override)
-        self.progress_calls: list[str] = []
         self._llms: dict[str | None, Mock] = {}  # provider -> mock llm
+
+    @property
+    def providers(self) -> list[str]:
+        """Override providers property to return test-specific list."""
+        return self._providers_override
 
     def llm(self, name: str | None = None, *, model: str | None = None):
         """Record llm() call and return a mock LLM for that provider."""
@@ -47,9 +51,6 @@ class FakeAgentContext:
             self._llms[name] = mock_llm
         return self._llms[name]
 
-    def progress(self, message: str, **kwargs) -> None:
-        self.progress_calls.append(message)
-
     async def check_cancelled(self) -> None:
         import asyncio
 
@@ -57,18 +58,21 @@ class FakeAgentContext:
             raise asyncio.CancelledError("Cancelled for testing")
 
 
-class FakeShell:
-    """Fake Shell that records fs_tools() calls and returns canned tool mocks."""
+class FakeShell(BaseShell):
+    """Test-specific subclass that records fs_tools() calls.
+
+    Extends the shared FakeShell from conftest.py with call recording and
+    returns mock tools for test assertions.
+    """
 
     def __init__(self):
+        super().__init__()
         self.fs_tools_calls = 0
-        self._tools: list[Mock] = []
 
     def fs_tools(self) -> list[Mock]:
-        """Return a list of mock filesystem tools."""
+        """Return a list of mock filesystem tools and record the call."""
         self.fs_tools_calls += 1
         # Create fresh tool mocks per call (each branch should get its own)
-        # Note: Mock(name="x") sets the mock's internal name, not the .name attribute
         read_mock = Mock()
         read_mock.name = "read_file"
         grep_mock = Mock()
@@ -145,7 +149,7 @@ class TestRouting:
 class TestFanOutDispatch:
     """Tests for the dispatch node that returns Send(...) objects."""
 
-    def test_two_providers_two_domains_yields_four_sends(self, monkeypatch):
+    def test_two_providers_two_domains_yields_four_sends(self):
         """With 2 providers and 2 domains, the cross-product yields exactly 4 Send objects.
 
         CRITICAL: This test hardcodes the expected domain strings ("quality", "security")
@@ -155,16 +159,16 @@ class TestFanOutDispatch:
 
         Fan-out lives in the conditional-edge router (route_to_branches), not in a node.
         """
-        from quality.agents.pr.tasks import review as review_module
         from quality.agents.pr.tasks.review import route_to_branches
 
-        def fake_resolve(ctx):
-            return [("alpha", "model-a-1"), ("beta", "model-b-2")]
-
-        monkeypatch.setattr(review_module, "_resolve_matrix", fake_resolve)
-
-        # Call route_to_branches directly (it returns Send objects for the conditional edge)
-        state = {"repo": "github.com/org/repo", "number": 1, "diff": "diff", "matrix": [], "error": None}
+        # Pass matrix directly in state (setup node populates this in production)
+        state = {
+            "repo": "github.com/org/repo",
+            "number": 1,
+            "diff": "diff",
+            "matrix": [("alpha", "model-a-1"), ("beta", "model-b-2")],
+            "error": None,
+        }
         sends = route_to_branches(state)
 
         # Assert 4 Sends with the specific cross-product tuples
@@ -191,25 +195,22 @@ class TestFanOutDispatch:
             f"Cross-product mismatch.\nGot: {send_tuples_sorted}\nExpected: {expected_sorted}"
         )
 
-    def test_empty_matrix_routes_to_synthesis(self, monkeypatch):
-        """When _resolve_matrix returns [], route_to_branches returns "synthesize_and_post".
+    def test_empty_matrix_routes_to_synthesis(self):
+        """When matrix is [], route_to_branches returns "synthesize_and_post".
 
-        Per ava semantics: empty matrix routes to synthesis (which produces an APPROVE with
-        no findings), NOT to END. Only state.error routes to END. This ensures the empty case
-        produces a visible report rather than silently hanging or looking like approval.
+        Per ava semantics: empty matrix routes to synthesis, NOT to END. Only state.error
+        routes to END.
+
+        NOTE: This test only checks routing. The claim that synthesis "makes the empty case
+        explicit" rather than "looking like approval" is contradicted by production behavior
+        — see test_stock_config_with_no_api_keys_must_not_post_false_clean_review (bug #53).
         """
-        from quality.agents.pr.tasks import review as review_module
         from quality.agents.pr.tasks.review import route_to_branches
-
-        monkeypatch.setattr(review_module, "_resolve_matrix", lambda ctx: [])
 
         state = {"repo": "github.com/org/repo", "number": 1, "diff": "diff", "matrix": [], "error": None}
         result = route_to_branches(state)
 
-        assert result == "synthesize_and_post", (
-            "Empty matrix must route to synthesis, not END. "
-            "Synthesis will produce APPROVE with no findings, making the empty case explicit."
-        )
+        assert result == "synthesize_and_post", "Empty matrix must route to synthesis, not END."
 
 
 class TestBranchExecution:
@@ -255,7 +256,13 @@ class TestBranchExecution:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -316,7 +323,13 @@ class TestBranchExecution:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -383,7 +396,13 @@ class TestBranchExecution:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         # State: is_followup=True but cur_prior="" (no prior for quality domain)
@@ -403,8 +422,7 @@ class TestBranchExecution:
 
         # Must use initial_prompt because cur_prior is empty
         assert initial_called["value"], (
-            "Branch must call initial_prompt when is_followup=True but cur_prior='' "
-            "(no prior findings for THIS domain)"
+            "Branch must call initial_prompt when is_followup=True but cur_prior='' (no prior findings for THIS domain)"
         )
         assert not followup_called["value"], "Branch must NOT call followup_prompt when cur_prior is empty"
 
@@ -466,15 +484,41 @@ class TestBranchExecution:
         """Each branch must bind both the fs_tools and the two recording tools.
 
         This pins the tool set available to the LLM during its review loop.
+
+        Security property (#65 Part B): the Shell backing the model's fs_tools is
+        constructed INSIDE ``review_branch`` and scoped to the branch's own
+        ``worktree_path`` — NOT the outer task-level Shell (which reaches ``repos/``)
+        and NOT the runtime dir. A branch reviewing one PR must not be able to read a
+        sibling repo's checkout or the operator's config. We capture the Shell
+        production actually constructs (via a recording subclass of the real Shell)
+        and assert on its ``allowed_paths``, so a future refactor that re-points the
+        model's fs_tools at a wider Shell fails here instead of silently regressing.
         """
+        from pathlib import Path
+
         from quality.agents.pr import memory as memory_module
+        from quality.agents.pr.tasks import review as review_module
         from quality.agents.pr.tasks.review import review_branch
+
+        from switchplane.shell import Shell
 
         monkeypatch.setattr(memory_module, "load_baseline", lambda path: None)
 
         from quality.agents.pr import prompts as prompts_module
 
         monkeypatch.setattr(prompts_module, "initial_prompt", lambda *a, **k: "prompt")
+
+        # Capture the Shell review_branch constructs for the model's fs_tools.
+        # RecordingShell is a real Shell subclass, so fs_tools() and validate_path
+        # behave exactly as in production — only the allowed_paths is observed.
+        captured_shells: list[Shell] = []
+
+        class RecordingShell(Shell):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured_shells.append(self)
+
+        monkeypatch.setattr(review_module, "Shell", RecordingShell, raising=True)
 
         from quality import ratelimit as ratelimit_module
 
@@ -488,7 +532,16 @@ class TestBranchExecution:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        runtime_dir = Path("/fake/runtime")
+        worktree = "/fake/runtime/repos/repo/wt-quality"
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=runtime_dir,
+        )
+        # Outer task-level shell is deliberately scoped WIDE (repos/) to prove the
+        # branch does not reuse it for the model's fs_tools.
         shell = FakeShell()
 
         state = {
@@ -498,7 +551,7 @@ class TestBranchExecution:
             "repo": "github.com/org/repo",
             "number": 1,
             "diff": "diff",
-            "worktree_path": "/wt",
+            "worktree_path": worktree,
         }
 
         await review_branch(ctx, shell, state)
@@ -512,8 +565,27 @@ class TestBranchExecution:
         # Extract tool names
         tool_names = {getattr(t, "name", str(t)) for t in tools}
 
-        # Assert fs_tools are present (read, grep, ls — exact names TBD by implementation)
-        assert shell.fs_tools_calls >= 1, "Branch must call shell.fs_tools()"
+        # The branch must construct exactly one worktree-scoped Shell for fs_tools.
+        assert len(captured_shells) == 1, "Branch must construct exactly one Shell (the worktree-scoped fs_tools Shell)"
+        fs_shell = captured_shells[0]
+
+        # The security property: fs_tools' Shell is scoped to the branch worktree,
+        # NOT the runtime dir and NOT the parent repos/ dir. Assert on the real
+        # allowed_paths production computed, resolved the way Shell resolves them.
+        expected = Path(worktree).resolve()
+        assert fs_shell.allowed_paths == [expected], (
+            f"fs_tools Shell must be scoped to the branch worktree_path, got {fs_shell.allowed_paths}"
+        )
+        # Explicit negatives: the two wider scopes #65 Part B moved off of.
+        assert runtime_dir.resolve() not in fs_shell.allowed_paths, (
+            "fs_tools Shell must not be scoped to the runtime dir"
+        )
+        assert (runtime_dir / "repos").resolve() not in fs_shell.allowed_paths, (
+            "fs_tools Shell must not be scoped to the shared repos/ dir"
+        )
+        # The model's fs_tools must come from this worktree-scoped Shell, not the
+        # outer task-level shell.
+        assert shell.fs_tools_calls == 0, "Branch must NOT source fs_tools from the outer task-level shell"
 
         # Assert recording tools are present
         assert "record_finding" in tool_names, "Branch must bind record_finding tool"
@@ -552,7 +624,9 @@ class TestRecordingTools:
                 assert record_finding_tool is not None, "record_finding tool not found in bound tools"
 
                 # Invoke it via ainvoke (tools may be async, and .func may be None or wrapped)
-                await record_finding_tool.ainvoke({"path": "foo.py", "line": 42, "severity": "high", "body": "Test finding"})
+                await record_finding_tool.ainvoke(
+                    {"path": "foo.py", "line": 42, "severity": "high", "body": "Test finding"}
+                )
 
                 # Return a message signaling stop (tool_calls=[] so run_tool_loop terminates)
                 msg = Mock()
@@ -566,7 +640,13 @@ class TestRecordingTools:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -617,8 +697,12 @@ class TestRecordingTools:
                 record_finding_tool = next((t for t in tools if getattr(t, "name", None) == "record_finding"), None)
 
                 # Call with invalid severity and with whitespace-padded valid severity
-                await record_finding_tool.ainvoke({"path": "foo.py", "line": 1, "severity": "URGENT", "body": "finding 1"})
-                await record_finding_tool.ainvoke({"path": "bar.py", "line": 2, "severity": "  HIGH  ", "body": "finding 2"})
+                await record_finding_tool.ainvoke(
+                    {"path": "foo.py", "line": 1, "severity": "URGENT", "body": "finding 1"}
+                )
+                await record_finding_tool.ainvoke(
+                    {"path": "bar.py", "line": 2, "severity": "  HIGH  ", "body": "finding 2"}
+                )
 
                 msg = Mock()
                 msg.content = "Done"
@@ -631,7 +715,13 @@ class TestRecordingTools:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -693,7 +783,9 @@ class TestRecordingTools:
                 record_finding_tool = next((t for t in tools if getattr(t, "name", None) == "record_finding"), None)
 
                 # Each branch call gets a unique call_id, so findings will be distinct
-                await record_finding_tool.ainvoke({"path": f"file-{call_id}.py", "line": 1, "severity": "info", "body": f"finding-{call_id}"})
+                await record_finding_tool.ainvoke(
+                    {"path": f"file-{call_id}.py", "line": 1, "severity": "info", "body": f"finding-{call_id}"}
+                )
 
                 msg = Mock()
                 msg.content = "Done"
@@ -706,7 +798,13 @@ class TestRecordingTools:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         # Run two branches with different domains
@@ -780,7 +878,13 @@ class TestCancellation:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         ctx.is_cancelled = True  # Signal cancellation
         shell = FakeShell()
 
@@ -831,7 +935,13 @@ class TestEdgeCases:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -889,7 +999,9 @@ class TestEdgeCases:
                 record_finding_tool = next((t for t in tools if getattr(t, "name", None) == "record_finding"), None)
 
                 # Record one finding, then raise
-                await record_finding_tool.ainvoke({"path": "partial.py", "line": 5, "severity": "low", "body": "Partial finding before crash"})
+                await record_finding_tool.ainvoke(
+                    {"path": "partial.py", "line": 5, "severity": "low", "body": "Partial finding before crash"}
+                )
                 raise RuntimeError("Simulated gateway failure")
 
             mock_llm = Mock()
@@ -898,7 +1010,13 @@ class TestEdgeCases:
 
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
 
-        ctx = FakeAgentContext(providers=["alpha"], config={"llm": {"providers": {"alpha": {"model": "model-a"}}}})
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
         shell = FakeShell()
 
         state = {
@@ -931,4 +1049,304 @@ class TestEdgeCases:
         # Assert ctx.progress was called to inform the user
         assert any("failed" in msg.lower() for msg in ctx.progress_calls), (
             "Branch must call ctx.progress to report failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_branch_failure_excludes_exception_message_from_note(self, monkeypatch):
+        """Branch exception message with secret must NOT leak into failed note.
+
+        Production (review.py:428) includes only type(exc).__name__ in the note body, not
+        str(exc). The exception message is the actual leak vector: note bodies feed the
+        synthesis prompt (review.py:795) and are published to GitHub, so str(exc) must
+        never reach them.
+
+        This test verifies the NEGATIVE half of the #50 security property: the exception
+        TYPE appears in the note (existing test), but the exception MESSAGE does not.
+
+        Coverage, not a fix: production is correct today (verified by execution with a
+        realistic credential in the exception message — note body had only the type,
+        progress had the redacted traceback).
+        """
+        from quality.agents.pr import memory as memory_module
+        from quality.agents.pr.tasks.review import review_branch
+
+        monkeypatch.setattr(memory_module, "load_baseline", lambda path: None)
+
+        from quality.agents.pr import prompts as prompts_module
+
+        monkeypatch.setattr(prompts_module, "initial_prompt", lambda *a, **k: "prompt")
+
+        from quality import ratelimit as ratelimit_module
+
+        # Realistic credential shape: GitHub PAT
+        SECRET = "ghp_" + "a" * 32  # 36-char GitHub PAT
+
+        def fake_with_rate_limit_retry(runnable):
+            async def fake_ainvoke(prompt):
+                # Raise exception with secret in message (simulating gateway auth failure)
+                raise RuntimeError(f"gateway auth failed for token {SECRET}")
+
+            mock_llm = Mock()
+            mock_llm.ainvoke = fake_ainvoke
+            return mock_llm
+
+        monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", fake_with_rate_limit_retry)
+
+        from pathlib import Path
+
+        ctx = FakeAgentContext(
+            providers=["alpha"],
+            config={"llm": {"providers": {"alpha": {"model": "model-a"}}}},
+            runtime_dir_path=Path("/fake/runtime"),
+        )
+        shell = FakeShell()
+
+        state = {
+            "domain": "security",
+            "provider": "alpha",
+            "model": "model-a",
+            "repo": "github.com/org/repo",
+            "number": 1,
+            "diff": "diff",
+            "worktree_path": "/wt",
+        }
+
+        result = await review_branch(ctx, shell, state)
+
+        # Assert a failed=True note was added
+        assert "notes" in result, "Branch result must include 'notes'"
+        failed_note = next((n for n in result["notes"] if n.get("failed")), None)
+        assert failed_note is not None, "Branch must add a note with failed=True"
+
+        # POSITIVE: exception type IS present (keeps #50 property)
+        assert "RuntimeError" in failed_note["body"], "Failed note body must mention exception type"
+
+        # NEGATIVE: raw secret is NOT in ANY string field of the note
+        # Iterate all fields to prevent future field additions from reintroducing the leak
+        for field_name, field_value in failed_note.items():
+            if isinstance(field_value, str):
+                assert SECRET not in field_value, (
+                    f"Failed note field '{field_name}' must not contain raw secret. "
+                    f"Note bodies feed synthesis prompt and are published to GitHub. "
+                    f"Production must use type(exc).__name__ only, not str(exc)."
+                )
+
+        # Assert secret is not in ctx.progress calls (redaction should work there too)
+        for progress_msg in ctx.progress_calls:
+            assert SECRET not in progress_msg, (
+                "ctx.progress must not contain raw secret. "
+                "Production redacts via redact_secrets(traceback.format_exc()) at review.py:422."
+            )
+
+    @pytest.mark.asyncio
+    async def test_stock_config_with_no_api_keys_must_not_post_false_clean_review(
+        self, monkeypatch, tmp_path, stub_setup_seams
+    ):
+        """Stock install with no api_keys must NOT post "No issues found" — zero reviewers ran.
+
+        Bug #53: A stock install posts a GitHub review saying "No quality or security issues
+        found." when zero models actually reviewed anything. The shipped config declares
+        opus+gpt with no api_key by design (users add keys in ~/.quality/config.toml), so
+        _resolve_matrix returns [] and route_to_branches sends it straight to synthesis.
+        The total-outage guard at review.py:745 requires `notes` to be non-empty, but an
+        empty matrix yields no notes and no findings — so it lands in the clean-PR branch
+        at :750. "Zero reviewers ran" and "two reviewers ran and found nothing" are currently
+        the same state.
+
+        This test pins the NEGATIVE property: with the real shipped config, _resolve_matrix
+        returns [] and driving the graph with matrix=[] must NOT submit any review, NOT
+        write a baseline, and must surface an error mentioning api_key or provider config.
+
+        Covers both GitHub and local mode (the local branch at :751-759 writes an artifact
+        with the same false text).
+
+        Uses ``stub_setup_seams`` rather than patching out the ``setup`` node: ``_resolve_matrix``
+        is called INSIDE setup (review.py:236), so replacing the node would delete the code
+        under test and the empty matrix would come from the initial state instead of from the
+        shipped config. Letting the real setup body run makes this an end-to-end assertion about
+        a stock install, and keeps the link between "config has no api_key" and "nothing posted".
+        """
+        import tomllib
+        from pathlib import Path
+
+        from quality.agents.pr.tasks.review import ReviewState, _resolve_matrix, build_graph
+
+        # Load the REAL shipped config — the point is that the *shipped* default has this property
+        shipped_config_path = Path(__file__).parent.parent / "quality" / "config.toml"
+        with open(shipped_config_path, "rb") as f:
+            shipped_config = tomllib.load(f)
+
+        # Verify the shipped config has no api_key in the default [llm] block
+        assert "api_key" not in shipped_config.get("llm", {}), (
+            "This test assumes the shipped config has no api_key in [llm] by design. "
+            "If that changed, this test's premise is invalid."
+        )
+
+        # Verify the shipped config has providers without api_keys
+        providers_config = shipped_config.get("llm", {}).get("providers", {})
+        assert len(providers_config) > 0, "Shipped config must declare providers"
+        for name, cfg in providers_config.items():
+            assert "api_key" not in cfg, (
+                f"Provider '{name}' has an api_key in shipped config — "
+                "this test assumes providers lack api_keys by design."
+            )
+
+        # Use shared fake from conftest
+        from conftest import FakeAgentContext, FakeShell
+
+        # Custom context that raises if llm() is called (proves no model was invoked)
+        class CtxThatRejectsLLMCalls(FakeAgentContext):
+            def __init__(self):
+                super().__init__(config=shipped_config, runtime_dir_path=tmp_path)
+                self.task_id = "test-stock-config"
+
+            def llm(self, name=None):
+                raise AssertionError(
+                    f"llm(name={name!r}) was called, but with matrix=[] no model should run. "
+                    "This means the empty-matrix guard is not working."
+                )
+
+        ctx = CtxThatRejectsLLMCalls()
+
+        # 1. Verify _resolve_matrix returns [] with the shipped config
+        matrix = _resolve_matrix(ctx)
+        assert matrix == [], f"_resolve_matrix with shipped config (no api_keys) must return [], got {matrix}"
+
+        # Stub GitHub seams
+        from quality import gh as gh_module
+
+        submitted_reviews = []
+        posted_comments = []
+
+        async def fake_submit_pr_review(shell, repo, number, event, body):
+            submitted_reviews.append((event, body))
+
+        async def fake_create_pr_review_comment(shell, repo, number, body, path, line, commit_id=None):
+            posted_comments.append({"path": path, "line": line, "body": body})
+
+        async def fake_list_review_comments(shell, repo, number):
+            return []
+
+        def fake_commentable_lines(diff):
+            return {"test.py": {10}}
+
+        monkeypatch.setattr(gh_module, "submit_pr_review", fake_submit_pr_review, raising=True)
+        monkeypatch.setattr(gh_module, "create_pr_review_comment", fake_create_pr_review_comment, raising=True)
+        monkeypatch.setattr(gh_module, "list_review_comments", fake_list_review_comments, raising=True)
+        monkeypatch.setattr(gh_module, "commentable_lines", fake_commentable_lines, raising=True)
+
+        # Stub memory seams
+        from quality.agents.pr import memory as memory_module
+
+        saved_baselines = []
+
+        def fake_save_baseline(root, **kwargs):
+            saved_baselines.append(kwargs)
+            return root / "baseline.json"
+
+        monkeypatch.setattr(memory_module, "save_baseline", fake_save_baseline, raising=True)
+        monkeypatch.setattr(memory_module, "baseline_path", lambda *a, **kw: tmp_path / "baseline.json", raising=True)
+        monkeypatch.setattr(memory_module, "load_baseline", lambda p: {"findings": []}, raising=True)
+
+        # Setup seams are stubbed by the stub_setup_seams fixture, which leaves the real
+        # setup body — and therefore _resolve_matrix — executing.
+
+        # 2. Drive the graph in GitHub mode. matrix is deliberately NOT set here: the real
+        # setup node resolves it from the shipped config, which is the property under test.
+        shell = FakeShell()
+
+        initial_state_github = ReviewState(
+            repo="github.com/org/repo",
+            number=42,
+            diff="diff --git a/test.py b/test.py\n@@ -1 +1 @@\n+test",
+            worktree_path="",  # setup will populate
+            head_sha="",
+            error=None,
+            is_followup=False,
+            findings=[],
+            notes=[],
+            local=False,
+        )
+
+        graph = build_graph(ctx, shell)
+        compiled = graph.compile()
+
+        result_github = await compiled.ainvoke(initial_state_github)
+
+        # Assert the real setup node RAN and resolved the matrix from the shipped config,
+        # rather than short-circuiting on a seam error. Without this, a setup failure would
+        # satisfy the error assertion below for entirely the wrong reason.
+        assert result_github.get("head_sha") == "stub-head-sha", (
+            f"setup must have run (head_sha from stub_setup_seams), got {result_github.get('head_sha')!r}. "
+            "If this is empty, setup raised and every assertion below is testing the wrong failure."
+        )
+        assert any("no api_key configured" in m for m in ctx.progress_calls), (
+            "setup must have resolved the matrix from the shipped config and skipped both "
+            f"key-less providers. progress_calls={ctx.progress_calls}"
+        )
+        assert result_github.get("matrix") == [], (
+            f"matrix must be resolved to [] by setup, got {result_github.get('matrix')!r}"
+        )
+
+        # 3. Assert NO review was submitted (GitHub mode)
+        assert len(submitted_reviews) == 0, (
+            f"Expected 0 reviews submitted with matrix=[], got {len(submitted_reviews)}. "
+            f"Submitted: {submitted_reviews}. "
+            "Bug #53: stock install posts false 'No issues found' when zero reviewers ran."
+        )
+
+        # 4. Assert NO baseline was written (GitHub mode)
+        assert len(saved_baselines) == 0, (
+            f"Expected 0 baselines saved with matrix=[], got {len(saved_baselines)}. "
+            "An empty matrix should not persist a baseline claiming a clean review."
+        )
+
+        # 5. Assert error is present and mentions api_key or provider config
+        assert result_github.get("error"), (
+            "result['error'] must be truthy with matrix=[]. "
+            "Setup failure (e.g. 'FakeShell' object has no attribute 'run') is a lying failure — "
+            "assert error mentions api_key or provider config, not a setup defect."
+        )
+        error_text = result_github["error"].lower()
+        assert "api_key" in error_text or "provider" in error_text or "config" in error_text, (
+            f"Error must mention api_key or provider config, got: {result_github['error']}"
+        )
+
+        # 6. Cover local mode — reset recording state
+        submitted_reviews.clear()
+        saved_baselines.clear()
+
+        initial_state_local = ReviewState(
+            repo="github.com/org/repo",
+            number=42,
+            diff="diff --git a/test.py b/test.py\n@@ -1 +1 @@\n+test",
+            worktree_path="",
+            head_sha="",
+            error=None,
+            is_followup=False,
+            findings=[],
+            notes=[],
+            local=True,  # Local mode
+        )
+
+        result_local = await compiled.ainvoke(initial_state_local)
+
+        # 7. Assert NO artifact was written (local mode)
+        artifact_dir = tmp_path / "reviews" / "github.com/org/repo"
+        artifact_files = list(artifact_dir.glob("*.md")) if artifact_dir.exists() else []
+        assert len(artifact_files) == 0, (
+            f"Expected 0 artifacts written with matrix=[] in local mode, got {len(artifact_files)}. "
+            "Bug #53: local branch at review.py:751-759 writes artifact with false clean text."
+        )
+
+        # 8. Assert NO baseline was written (local mode)
+        assert len(saved_baselines) == 0, (
+            f"Expected 0 baselines saved with matrix=[] in local mode, got {len(saved_baselines)}"
+        )
+
+        # 9. Assert error is present (local mode)
+        assert result_local.get("error"), "result['error'] must be truthy with matrix=[] in local mode"
+        error_text_local = result_local["error"].lower()
+        assert "api_key" in error_text_local or "provider" in error_text_local or "config" in error_text_local, (
+            f"Error must mention api_key or provider config (local mode), got: {result_local['error']}"
         )

@@ -368,9 +368,7 @@ def _build_graph(llm, triage_llm) -> StateGraph:
         return {"triage": response.content}
 
     async def summarize(state: ReviewState) -> dict:
-        prompt = _ANALYSIS_PROMPT.format(
-            triage_findings=state["triage"], formatted_data=state["formatted"]
-        )
+        prompt = _ANALYSIS_PROMPT.format(triage_findings=state["triage"], formatted_data=state["formatted"])
         response = await llm.ainvoke(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},

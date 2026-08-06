@@ -17,6 +17,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio  # noqa: F401 — imported for test monkeypatching
+import os
 import re
 import shutil
 from pathlib import Path
@@ -70,11 +71,17 @@ def parse_pr_url(url: str, allowed_hosts: list[str] | None) -> tuple[str, int]:
     if pull_keyword != "pull":
         raise ValueError("Invalid PR URL")
 
+    # Reject userinfo (user:pass@host) explicitly before allowlist check
+    # This prevents both credential leakage and misleading rejection messages
+    if "@" in host:
+        raise ValueError("PR URL must not contain userinfo (user:password@host)")
+
     # Validate host against allowlist (case-insensitive match)
     if allowed_hosts is not None and not any(host.lower() == allowed.lower() for allowed in allowed_hosts):
         raise ValueError(f"Host {host} not in the allowed hosts")
 
     # Validate all segments (host, org, repo, pr_num_str) against charset and reject dot/dotdot
+    # Note: host cannot contain @ at this point (rejected above)
     segment_pattern = re.compile(r"^[A-Za-z0-9._-]+$")
     for segment in [host, org, repo, pr_num_str]:
         if segment in (".", ".."):
@@ -228,10 +235,7 @@ async def run_git(shell, cmd: list[str], cwd: Path | None = None) -> str:
         )
     except RuntimeError as exc:
         if _is_ssh_auth_error(exc):
-            raise RuntimeError(
-                "SSH authentication failed after retries. "
-                "Run: ssh-add --apple-use-keychain"
-            ) from exc
+            raise RuntimeError("SSH authentication failed after retries. Run: ssh-add --apple-use-keychain") from exc
         raise
 
 
@@ -247,12 +251,10 @@ def _gh_env(host: str) -> dict[str, str]:
     Returns:
         Environment dict with GH_HOST set
     """
-    return {"GH_HOST": host}
+    return {**os.environ, "GH_HOST": host}
 
 
-async def create_pr_worktree(
-    shell, repo_path: Path, pr_number: int, task_id: str
-) -> tuple[Path, str]:
+async def create_pr_worktree(shell, repo_path: Path, pr_number: int, task_id: str) -> tuple[Path, str]:
     """Create a detached git worktree at the PR head SHA.
 
     CRITICAL: Runs `git worktree prune` BEFORE `git worktree add` unconditionally.
@@ -346,13 +348,16 @@ async def clone_or_update_repo(shell, repo: str, cache_root: Path) -> Path:
     repo_path = cache_root / repo
 
     if not repo_path.exists():
-        # Clone via gh repo clone
+        # Clone via gh repo clone (caller guarantees repo_path.parent is private)
         repo_path.parent.mkdir(parents=True, exist_ok=True)
         host, rest = repo.split("/", 1)  # Split "github.com/org/repo" -> ("github.com", "org/repo")
         await shell.run(
             ["gh", "repo", "clone", rest, str(repo_path)],
             env=_gh_env(host),
         )
+        # Ensure clone directory is private (gh repo clone uses default umask)
+        if repo_path.exists():
+            repo_path.chmod(0o700)
     else:
         # Fetch all + prune, checkout default branch, pull
         await run_git(shell, ["git", "fetch", "--all", "--prune"], cwd=repo_path)
@@ -484,15 +489,13 @@ async def list_review_comments(shell, repo: str, pr_number: int) -> list[dict]:
 
     host, rest = repo.split("/", 1)
     output = await shell.run(
-        ["gh", "api", f"repos/{rest}/pulls/{pr_number}/comments"],
+        ["gh", "api", "--paginate", f"repos/{rest}/pulls/{pr_number}/comments"],
         env=_gh_env(host),
     )
     return json.loads(output)
 
 
-async def submit_pr_review(
-    shell, repo: str, pr_number: int, event: str, body: str
-) -> None:
+async def submit_pr_review(shell, repo: str, pr_number: int, event: str, body: str) -> None:
     """Submit a PR review via gh api.
 
     Args:

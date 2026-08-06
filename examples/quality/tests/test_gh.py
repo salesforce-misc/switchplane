@@ -207,14 +207,7 @@ def test_commentable_lines_removed_not_commentable():
     """Removed (-) lines do not appear in the result."""
     from quality.gh import commentable_lines
 
-    diff = (
-        "diff --git a/foo.py b/foo.py\n"
-        "--- a/foo.py\n"
-        "+++ b/foo.py\n"
-        "@@ -1,2 +1,1 @@\n"
-        "-removed\n"
-        " kept\n"
-    )
+    diff = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,1 @@\n-removed\n kept\n"
     result = commentable_lines(diff)
     # Only line 1 (context) is commentable; removed line does not contribute
     assert result["foo.py"] == {1}
@@ -224,14 +217,7 @@ def test_commentable_lines_new_file():
     """A new file (--- /dev/null) has all + lines commentable."""
     from quality.gh import commentable_lines
 
-    diff = (
-        "diff --git a/new.py b/new.py\n"
-        "--- /dev/null\n"
-        "+++ b/new.py\n"
-        "@@ -0,0 +1,2 @@\n"
-        "+first\n"
-        "+second\n"
-    )
+    diff = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+first\n+second\n"
     result = commentable_lines(diff)
     assert result["new.py"] == {1, 2}
 
@@ -240,14 +226,7 @@ def test_commentable_lines_deleted_file():
     """A deleted file (+++ /dev/null) has no commentable lines and is absent."""
     from quality.gh import commentable_lines
 
-    diff = (
-        "diff --git a/gone.py b/gone.py\n"
-        "--- a/gone.py\n"
-        "+++ /dev/null\n"
-        "@@ -1,2 +0,0 @@\n"
-        "-a\n"
-        "-b\n"
-    )
+    diff = "diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n"
     result = commentable_lines(diff)
     assert result == {}
 
@@ -256,12 +235,7 @@ def test_commentable_lines_pure_rename():
     """A pure rename (no @@ hunk) yields no entry — pins the 422 avoidance."""
     from quality.gh import commentable_lines
 
-    diff = (
-        "diff --git a/old.py b/new.py\n"
-        "similarity index 100%\n"
-        "rename from old.py\n"
-        "rename to new.py\n"
-    )
+    diff = "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n"
     result = commentable_lines(diff)
     assert result == {}
 
@@ -320,13 +294,7 @@ def test_commentable_lines_strips_b_prefix():
     """The +++ b/path prefix is stripped."""
     from quality.gh import commentable_lines
 
-    diff = (
-        "diff --git a/foo.py b/foo.py\n"
-        "--- a/foo.py\n"
-        "+++ b/foo.py\n"
-        "@@ -1,1 +1,1 @@\n"
-        " x\n"
-    )
+    diff = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1,1 +1,1 @@\n x\n"
     result = commentable_lines(diff)
     assert "foo.py" in result
 
@@ -477,9 +445,7 @@ async def test_create_pr_worktree_fetches_pr_head(fake_shell):
     fake_shell.stub(("git", "fetch"), "")
     fake_shell.stub(("git", "rev-parse"), "deadbeef")
 
-    _worktree_path, sha = await create_pr_worktree(
-        fake_shell, Path("/repo"), 99, "task.456"
-    )
+    _worktree_path, sha = await create_pr_worktree(fake_shell, Path("/repo"), 99, "task.456")
 
     assert sha == "deadbeef"
     # Check that fetch was called for the PR ref
@@ -608,6 +574,28 @@ async def test_remove_worktree_prunes_removes_and_rmtrees(fake_shell, tmp_path):
 
 
 # -- GitHub API wrappers (host via _gh_env, -R org/repo) --------------------
+
+
+def test_gh_env_retains_required_ambient_vars_and_overrides_host(monkeypatch):
+    """Keep required process vars while replacing an untrusted ambient host."""
+    import os
+
+    from quality.gh import _gh_env
+
+    monkeypatch.setenv("PATH", "/trusted/bin")
+    monkeypatch.setenv("HOME", "/trusted/home")
+    monkeypatch.setenv("GH_HOST", "evil.example.com")
+
+    env = _gh_env("github.com")
+
+    assert env["PATH"] == "/trusted/bin"
+    assert env["HOME"] == "/trusted/home"
+    assert env["GH_HOST"] == "github.com"
+    assert os.environ["GH_HOST"] == "evil.example.com"
+    assert env is not os.environ
+
+    env["GH_HOST"] = "mutated.example.com"
+    assert os.environ["GH_HOST"] == "evil.example.com"
 
 
 async def test_get_pr_diff_uses_gh_env_and_dash_r(fake_shell, tmp_path):
@@ -739,9 +727,7 @@ async def test_create_pr_review_comment_posts_comment(fake_shell, tmp_path):
 
     fake_shell.stub(("gh", "api"), "")
 
-    await create_pr_review_comment(
-        fake_shell, "github.com/org/repo", 7, "comment", "file.py", 10, "abc123"
-    )
+    await create_pr_review_comment(fake_shell, "github.com/org/repo", 7, "comment", "file.py", 10, "abc123")
 
     api_calls = [(c, kw) for m, c, kw in fake_shell.calls if m == "run" and c[0] == "gh" and c[1] == "api"]
     assert len(api_calls) == 1
