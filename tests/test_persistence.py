@@ -423,6 +423,17 @@ class TestStoreConnection:
         conn = store.connection
         assert conn is not None
 
+    @pytest.mark.asyncio
+    async def test_initialize_sets_busy_timeout(self, tmp_path):
+        s = Store(tmp_path / "test.db")
+        await s.initialize()
+        try:
+            cursor = await s.connection.execute("PRAGMA busy_timeout")
+            row = await cursor.fetchone()
+            assert row[0] >= 5000
+        finally:
+            await s.close()
+
 
 class TestStoreClose:
     @pytest.mark.asyncio

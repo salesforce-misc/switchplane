@@ -45,6 +45,12 @@ class Store:
         try:
             # Enable WAL mode for better concurrency
             await self._db.execute("PRAGMA journal_mode=WAL")
+            # Wait up to 5s for the SQLite writer lock instead of failing
+            # instantly with "database is locked". The agent subprocess
+            # opens the same DB for its LangGraph checkpointer and can
+            # briefly hold the writer lock while the control plane is
+            # trying to persist streamed events.
+            await self._db.execute("PRAGMA busy_timeout=5000")
 
             # Create tables if they don't exist
             await self._db.execute("""
