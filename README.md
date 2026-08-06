@@ -1,45 +1,31 @@
 # Switchplane
 
-Switchplane is a local runtime control plane for LangGraph tasks. It gives each application an isolated daemon, generated CLI, subprocess execution, persistent task history, and operational controls.
+**Switchplane turns LangGraph workflows into locally operable applications, with a generated CLI, supervised task processes, persistent task history, and checkpoint recovery.**
 
-> **If it is deterministic, write it in code. If it requires judgment, call the model.**
+> If it is deterministic, write it in code. If it requires judgment, call the model.
+
+Most agent harnesses begin with a model-directed loop: give an LLM tools and let it decide what happens next. Switchplane begins with an application-defined workflow. You write the nodes, edges, state, and failure boundaries in Python with [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview); LLM calls are just nodes where nondeterminism is useful.
 
 ```text
-fetch -> analyze -> judge -> act
- code      code      LLM     code
+fetch_metrics -> analyze -> summarize -> compile_report
+    Python        Python        LLM           Python
 ```
 
-LangGraph defines what your task does. Switchplane handles how it runs: process isolation, persistence, event delivery, checkpoint-backed retry, interactive input, and control from a CLI or terminal UI.
+That distinction matters when the workflow must be testable, inspectable, cost-conscious, and operable after the first prompt. Switchplane adds a per-application control plane around the graph: validated task inputs, supervised subprocesses, persisted task records and events, live commands, child tasks, and opt-in LangGraph checkpoints.
 
-> **Early-stage, actively developed.** Public APIs, IPC protocols, and storage formats may change without notice.
+Switchplane is not a coding agent or a replacement for LangGraph. It is the local runtime that turns your workflows into an operational CLI.
 
-## Why Switchplane?
+> **Alpha software:** APIs, IPC protocols, and storage formats may change.
 
-Agent workflows need nondeterminism in specific places, not throughout the runtime around them. Switchplane keeps the execution model explicit while leaving model choice and task logic in your code.
+## Quickstart
 
-- **Deterministic orchestration.** LangGraph executes the flow you define. Ordinary Python handles validation, analysis, branching, and output formatting.
-- **Operational control.** Start, inspect, follow, command, cancel, and retry tasks from a generated CLI or full-screen TUI.
-- **Persistent history.** Task status, durable events, structured results, errors, and checkpoints live in a per-application SQLite database.
-- **Process isolation.** User code runs in supervised subprocesses rather than inside the control plane.
-- **Model independence.** Select providers at runtime, mix models in one graph, or omit LLMs entirely.
-
-Switchplane is not a hosted platform, prompt framework, or replacement for LangGraph. It is the local process and operations layer around LangGraph applications.
-
-## Quick Start
-
-Switchplane requires Python 3.12+ and currently targets POSIX systems such as macOS and Linux.
-
-From a repository checkout:
+Requires a Unix-like OS and Python 3.12+. The commands below use [uv](https://docs.astral.sh/uv/); equivalent `venv` and pip commands also work.
 
 ```bash
 uv venv .venv
 source .venv/bin/activate
-uv pip install -e .
-```
+uv pip install 'switchplane==0.10.2'
 
-Create and run a standalone application:
-
-```bash
 switchplane init myapp
 cd myapp
 uv pip install -e .
@@ -48,66 +34,57 @@ myapp agent list
 myapp run default hello --user-name Alice
 ```
 
-The daemon starts automatically. The task runs in an agent subprocess, and its result and events are stored under `~/.myapp/`.
-
-```bash
-myapp task list                    # Find task IDs
-myapp task show <task_id>          # Inspect the result and event history
-myapp run default hello -d         # Submit and return immediately
-myapp                              # Open the full-screen TUI in a terminal
-```
-
-Attached `run` output is plain text and works in pipelines. A bare application command opens the TUI only when standard input is a TTY.
-
-The generated hello task reports progress during the run and stores its greeting as the task result. Use `task show` to inspect it.
-
-## Mental Model
-
-```text
-myapp CLI
-    |
-    v
-per-app control plane daemon
-    |
-    +-- SQLite: tasks, events, results, checkpoints
-    |
-    v
-agent subprocess
-    |
-    v
-Task.run(ctx) -> LangGraph StateGraph
-```
-
-Each application has its own CLI, daemon, Unix socket, database, logs, and configuration. There is no shared global Switchplane runtime.
-
-| Layer | Responsibility |
-|---|---|
-| **Application** | Registers discovery roots, configuration, and optional MCP servers, then builds the CLI. |
-| **Control plane** | Owns task lifecycle and persistence, supervises subprocesses, and routes messages. |
-| **Agent** | Provides the subprocess environment in which a task executes. |
-| **Task** | Defines typed parameters and runs a LangGraph graph or other task-specific control loop. |
-
-Tasks are the first-class runtime entities. Each task has an ID, lifecycle status, input, durable event history, and stored result. Agents are execution hosts for those tasks.
-
-The control plane never runs domain logic. CLI traffic uses a Unix domain socket; every launched agent receives a dedicated bidirectional Unix socketpair.
-
-## Build a Task
-
-`switchplane init myapp` generates this structure:
+`switchplane init` generates a complete package with an application, agent, LangGraph task, and CLI entry point:
 
 ```text
 myapp/
 ├── pyproject.toml
 └── myapp/
     ├── app.py
-    └── agents/
-        └── default/
-            ├── agent.py
-            └── tasks/
-                └── hello.py
+    └── agents/default/
+        ├── agent.py
+        └── tasks/hello.py
 ```
 
-The application discovers agents and exposes the generated CLI:
+The daemon starts on demand. The attached command streams events inline; `Ctrl+C` detaches without stopping the task. Use the printed task ID with `myapp task show <task-id>` to inspect the structured greeting. Run `myapp` with no subcommand to open the full-screen TUI.
+
+## Runtime model
+
+```text
+myapp CLI/TUI
+      |
+      | Unix socket
+      v
+per-app control plane ----> SQLite task/event store
+      |
+      | dedicated socketpair
+      v
+supervised task subprocess ----> LangGraph workflow
+```
+
+Each application gets its own runtime under `~/.<app-name>/`. The control plane owns task and event persistence; task execution runs in a child process. A task has a stable ID, validated input, lifecycle status, structured result or error, and durable application events. Streaming token chunks are live-only.
+
+The process boundary protects the control plane from task crashes and permits bidirectional commands. It is **not** a security sandbox: task processes retain the current user's filesystem, environment, and network access.
+
+## How it differs
+
+[OpenCode](https://opencode.ai/docs/) and [Pi](https://pi.dev/docs/latest) are capable, extensible coding-agent harnesses. Their primary abstraction is an interactive session driven by an LLM/tool loop. Switchplane's primary abstraction is an application task whose control flow is defined in code.
+
+| | OpenCode | Pi | Switchplane |
+|---|---|---|---|
+| Primary use | Coding agent | Coding-agent harness | Runtime for agentic applications |
+| Default control flow | Model-directed tool loop | Model-directed tool loop | Application-defined graph |
+| Durable unit | Session and messages | Session tree | Task, events, result, optional graph state |
+| Composition | Agents, subagents, plugins | Extensions, skills, subprocess patterns | Graph nodes and linked child tasks |
+| Recovery | Continue a session | Continue a session | Explicitly retry from an opt-in LangGraph checkpoint |
+| Task execution | Session/server runtime | In-process by default; isolation is opt-in | Supervised subprocess per task |
+| Operator surface | TUI, desktop, web, server, SDK | TUI, print, RPC, SDK | Generated per-app CLI and TUI |
+
+This is a difference in defaults, not capability. OpenCode plugins and Pi extensions can implement deterministic orchestration; Switchplane makes application-authored workflow topology and task operations the starting point. OpenCode and Pi are stronger choices for interactive coding, broad client surfaces, and more extensive documented agent customization. Switchplane is for workflows where the model should participate in the process, not own it.
+
+## Write a workflow
+
+The generated application discovers tasks and becomes the installed CLI:
 
 ```python
 # myapp/app.py
@@ -121,249 +98,279 @@ def main():
     app.run()
 ```
 
-An agent is an execution host. Tasks are discovered from its `tasks` package:
+Tasks declare Pydantic-validated inputs and execute ordinary async Python. Switchplane is designed to host LangGraph graphs, but it does not force every task to use one.
 
 ```python
-# myapp/agents/default/agent.py
-from switchplane.agent import AgentSpec
-
-agent_spec = AgentSpec(agent_name="default")
-```
-
-A task combines typed parameters with a LangGraph workflow:
-
-```python
-# myapp/agents/default/tasks/greet.py
+# myapp/agents/default/tasks/report.py
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
-
 from switchplane import Field, Task
 from switchplane.agent_runtime import AgentContext
 
 
-class GreetState(TypedDict):
-    name: str
-    greeting: str
+class State(TypedDict):
+    source: str
+    result: str | None
 
 
-def greet(state: GreetState) -> dict:
-    return {"greeting": f"Hello, {state['name']}!"}
+def analyze(state: State) -> State:
+    return {**state, "result": f"analyzed {state['source']}"}
 
 
-def build_graph() -> StateGraph:
-    graph = StateGraph(GreetState)
-    graph.add_node("greet", greet)
-    graph.set_entry_point("greet")
-    graph.add_edge("greet", END)
-    return graph
+class Report(Task):
+    name = "report"
+    description = "Analyze a source"
 
-
-class GreetTask(Task):
-    name = "greet"
-    description = "Greet someone by name"
-
-    recipient: str = Field(description="Who to greet")
+    source: str = Field(description="Input to analyze")
 
     async def run(self, ctx: AgentContext) -> None:
-        graph = build_graph().compile()
-        result = await graph.ainvoke(
-            {"name": self.recipient, "greeting": ""}
+        graph = StateGraph(State)
+        graph.add_node("analyze", analyze)
+        graph.set_entry_point("analyze")
+        graph.add_edge("analyze", END)
+
+        result = await graph.compile().ainvoke(
+            {"source": self.source, "result": None}
         )
-        ctx.stream_flush(result["greeting"])
         ctx.complete(result)
 ```
 
-Run it with:
+```bash
+myapp run default report --source metrics.json
+```
+
+Keep deterministic work in ordinary nodes. Put model calls only in nodes that need classification, synthesis, planning, or other judgment. The runtime enforces execution mechanics, not whether your node is deterministic.
+
+## Operate tasks
+
+Every Switchplane app exposes the same command structure:
 
 ```bash
-myapp run default greet --recipient Alice
+# Execute
+<app> run <agent> <task> [--param value ...]
+<app> run <agent> <task> [--param value ...] --detach
+
+# Inspect and control
+<app> agent list
+<app> task list [--status running]
+<app> task show <task-id>
+<app> task follow <task-id>
+<app> task cancel <task-id>
+<app> task retry <task-id> [-d]
+<app> task clear
+<app> task purge
+
+# Manage the daemon
+<app> runtime start
+<app> runtime status
+<app> runtime stop
 ```
 
-`Field()` attributes become validated CLI parameters. `ctx.stream_flush()` emits user-facing, replayable text; `ctx.complete()` stores the structured result for later inspection with `task show`.
+`task clear` hides terminal tasks by marking them `cleared`; data remains until `task purge`. Purging is refused while tasks are running.
 
-Keep one public `Task` subclass in each task module, with the module filename matching `Task.name` (`greet.py` and `name = "greet"`).
+### Interactive tasks
 
-### Checkpointing
-
-Pass Switchplane's LangGraph checkpointer when a task should retry from saved graph state:
-
-```python
-graph = build_graph().compile(checkpointer=ctx.checkpointer)
-config = {"configurable": {"thread_id": ctx.task_id}}
-checkpoint = await graph.aget_state(config)
-input_state = None if checkpoint and checkpoint.values else initial_state
-result = await graph.ainvoke(input_state, config)
-ctx.complete(result)
-```
-
-LangGraph saves state after each node. `task retry` relaunches the same task ID, but task code still decides how to resume: invoke with `None` from an existing checkpoint, resume an interrupt with `Command`, or start with fresh input when no checkpoint exists. A task without a checkpointer runs again from the beginning.
-
-## Operate Tasks
-
-Every Switchplane application gets the same command structure. Replace `<app>` with the application's command name.
-
-| Purpose | Command |
-|---|---|
-| Open the TUI | `<app>` |
-| Run attached | `<app> run <agent> <task> [--key value ...]` |
-| Run detached | `<app> run <agent> <task> [--key value ...] -d` |
-| Discover agents and tasks | `<app> agent list` |
-| List tasks | `<app> task list [--status <status>]` |
-| Inspect a task | `<app> task show <task_id>` |
-| Follow task events | `<app> task follow <task_id>` |
-| Cancel a task | `<app> task cancel <task_id>` |
-| Retry a task | `<app> task retry <task_id> [-d]` |
-| Send a task command | `<app> task <task_id> <command> [--key value ...]` |
-| Hide terminal tasks | `<app> task clear` |
-| Delete terminal task data | `<app> task purge [-y]` |
-| Manage the daemon | `<app> runtime start\|status\|stop` |
-| Log in to an MCP server | `<app> auth login <server_name>` |
-| Inspect MCP authentication | `<app> auth status` |
-| Log out of an MCP server | `<app> auth logout <server_name>` |
-
-`Ctrl+C` detaches from attached output without cancelling the task. Use `task cancel` when the task itself should stop.
-
-Task lifecycle statuses are:
-
-```text
-pending -> running -> completed
-              |-----> failed
-              |-----> cancelled
-              |-----> interrupted -> running
-
-completed / failed / cancelled -> cleared
-completed / failed / cancelled -> retry -> pending
-```
-
-`task clear` hides terminal tasks from the default listing but preserves their data. `task purge` permanently removes terminal task records, events, checkpoints, task files, and task logs.
-
-### Runtime Commands
-
-Long-running tasks can expose typed commands with `@command`:
+Long-running tasks can receive typed commands without restarting:
 
 ```python
 from switchplane import Task, command
+from switchplane.agent_runtime import AgentContext
 
 
-class WatchTask(Task):
+class Watch(Task):
     name = "watch"
     mode = "long_running"
 
-    latitude = 49.2827
-    longitude = -123.1207
-
     @command
-    def coordinates(self, ctx, lat: float, lon: float):
-        self.latitude = lat
-        self.longitude = lon
-        return {"latitude": lat, "longitude": lon}
+    def coordinates(self, ctx: AgentContext, lat: float, lon: float):
+        self.lat, self.lon = lat, lon
+        return {"lat": lat, "lon": lon}
 
-    async def run(self, ctx):
+    async def run(self, ctx: AgentContext) -> None:
         while not ctx.is_cancelled:
             await self.process_commands(ctx)
-            ctx.progress(
-                f"Watching ({self.latitude}, {self.longitude})"
-            )
-            if not await ctx.sleep(60):
-                break
+            await ctx.sleep(60)
 ```
 
 ```bash
-weather task <task_id> coordinates --lat 51.5074 --lon -0.1278
+<app> task <task-id> coordinates --lat 51.5074 --lon -0.1278
 ```
 
-`mode = "long_running"` describes the task; your code still owns its loop, cancellation checks, sleeps, and command processing.
+`mode = "long_running"` is descriptive metadata; the task implements its own loop. With `ctx.checkpointer` configured, a task can also call `ctx.wait_for_input()` to enter the `interrupted` state and accept freeform text.
 
-### Interactive TUI
+In attached CLI mode, type `/command`; `Ctrl+C` detaches. In the TUI:
 
-Run an application with no subcommand to open its terminal UI. It shows a system tab plus one tab per attached task and receives new events over a persistent connection.
-
-The input model has three forms:
-
-```text
-:task list                      daemon command
-/coordinates --lat 49.2        command for the focused task
-hello                           freeform input while the task is interrupted
-```
-
-Use `Tab` and `Shift+Tab` to switch tasks, `Ctrl+D` to detach the focused tab without changing its task, `Ctrl+X` to cancel the focused task, and `Ctrl+C` to leave the TUI.
-
-## Capabilities
-
-| Capability | What Switchplane provides |
+| Input | Action |
 |---|---|
-| **Persistence** | SQLite-backed task records, durable events, results, errors, and LangGraph checkpoints. |
-| **Event output** | Durable lifecycle, progress, and flush events plus ephemeral streaming chunks. |
-| **Checkpoint retry** | Operator-triggered retry using the original task ID and any saved graph state. |
-| **Interactive input** | `ctx.wait_for_input()` for checkpoint-backed graphs that pause for freeform input. |
-| **Configuration** | App TOML defaults deep-merged with user overrides at `~/.<app>/config.toml`. |
-| **LLM routing** | `ctx.llm()` and named `[llm.providers.<name>]` entries selected at runtime. |
-| **MCP** | Managed stdio or streamable HTTP sessions and LangChain-compatible tools. |
-| **Shell tools** | Allowlists for executable commands and filesystem paths, without shell interpretation. |
-| **Coordination** | Child-task submission, status queries, parallel waits, parent-cascade cancellation, and notifications. |
-| **Task files** | Per-task data directories accessed through path-restricted `Task.open()`. |
+| `:run ...`, `:task ...`, `:runtime ...` | Control-plane command |
+| `/command ...` | Command for the focused task |
+| Plain text | Input for an interrupted task |
+| `Tab`, `0`-`9` | Switch tabs |
+| `Ctrl+X`, `Ctrl+D`, `Ctrl+C` | Cancel, detach, quit |
 
-### Configuration and Integrations
+The TUI receives pushed events over a persistent subscription. Attached CLI mode currently polls for incremental events.
 
-Applications can bundle TOML defaults while users keep credentials and overrides in `~/.<app>/config.toml`. Named entries under `[llm.providers.<name>]` let a task choose models at runtime:
+### Checkpoint and retry
+
+Opt a LangGraph task into persisted graph state:
 
 ```python
-default_llm = ctx.llm()
-fast_llm = ctx.llm("fast")
+async def run(self, ctx: AgentContext) -> None:
+    graph = build_graph().compile(checkpointer=ctx.checkpointer)
+    config = {"configurable": {"thread_id": ctx.task_id}}
+    checkpoint = await graph.aget_state(config)
+    graph_input = None if checkpoint.values else initial_state
+    result = await graph.ainvoke(graph_input, config)
+    ctx.complete(result)
 ```
 
-Model adapters are loaded lazily, so applications install only the provider packages they use.
+```bash
+myapp task retry <task-id>
+```
 
-MCP servers are registered on the application, allowed by the agent, and selected by the task. `ctx.mcp_tools()` returns a name-to-tool mapping that can be bound to an LLM:
+Checkpoints survive agent and daemon exits. Recovery is explicit, not automatic: startup marks orphaned live tasks failed, and `task retry` relaunches the same task ID. The task must detect the saved state and resume LangGraph with `None`, as above; passing `initial_state` starts again at the entry point. Without `ctx.checkpointer`, retry reruns the task from the beginning.
+
+### Child tasks
+
+Tasks can submit linked work through the control plane:
 
 ```python
-tool_map = await ctx.mcp_tools()
-llm = ctx.llm().bind_tools(list(tool_map.values()))
+child_id = await ctx.submit_task("worker", "process", {"chunk": 1})
+child = await ctx.wait_for_task(child_id)
+
+await ctx.notify_task(other_task_id, {"status": "ready"})
+message = await ctx.wait_for_notification(timeout=60)
 ```
 
-Install MCP support with `pip install 'switchplane[mcp]'`. Stdio and streamable HTTP servers are supported, including OAuth for HTTP servers.
+`wait_for_task()` polls durable task state. Notifications are transient and require the target task to be running. Cancelling a parent cascades to its children.
 
-Tasks can also submit child tasks, wait for one or many results, and exchange notifications through `ctx`. Child relationships are persisted, and cancelling a parent cascades to non-terminal children.
+## Configuration
+
+Applications can bundle defaults and users override them at `~/.<app-name>/config.toml`. Values are deep-merged, and each agent receives global settings merged with its own overrides.
+
+```python
+from pathlib import Path
+from switchplane import Application
+
+app = Application(
+    name="myapp",
+    default_config=Path(__file__).parent / "config.toml",
+)
+```
+
+```toml
+# Bundled defaults
+[llm]
+model = "claude-sonnet-4-20250514"
+
+[agents.reviewer]
+system_prompt = "Review the supplied evidence."
+```
+
+```toml
+# ~/.myapp/config.toml
+[llm]
+api_key = "..."
+
+[agents.reviewer.llm]
+model = "claude-haiku-4-5-20251001"
+```
+
+Configuration is available as `ctx.config`. The optional `switchplane.llm` helper routes `claude-*`, `gemini-*`, and `gpt-*` models to their LangChain adapters. Applications can supply their own factory for other providers or local models.
+
+## MCP
+
+Register stdio or streamable-HTTP [MCP](https://modelcontextprotocol.io/) servers on the application, make them available to an agent, and select the servers required by each task:
+
+```python
+# app.py
+from switchplane.app import McpServerConfig
+
+app.register_mcp_server(McpServerConfig(
+    name="tools",
+    command=["python", "tools_server.py"],
+))
+```
+
+```python
+# agent.py
+from switchplane.agent import AgentSpec
+
+agent_spec = AgentSpec(agent_name="default", mcp_servers=["tools"])
+```
+
+```python
+class Analyze(Task):
+    name = "analyze"
+    mcp_servers = ["tools"]
+
+    async def run(self, ctx: AgentContext) -> None:
+        tool_map = await ctx.mcp_tools()
+        tools = list(tool_map.values())
+```
+
+Install with `pip install 'switchplane[mcp]'`. HTTP servers may use built-in PKCE authentication (MCP OAuth discovery or explicitly configured OIDC):
+
+```bash
+<app> auth login <server>
+<app> auth status
+<app> auth logout <server>
+```
+
+## Guardrailed shell
+
+`Shell` executes argument arrays without shell interpretation and can restrict executable basenames, working directories, time, and explicitly declared path parameters.
+
+```python
+from pathlib import Path
+from switchplane import Shell
+
+shell = Shell(
+    allowed_paths=[Path.cwd()],
+    allowed_commands=["git", "rg"],
+)
+
+output = await shell.run(["git", "status", "--short"], cwd=Path.cwd())
+```
+
+These checks are defense in depth, not an OS sandbox. Ordinary command arguments are not treated as paths unless the tool declares them as path parameters.
 
 ## Examples
 
-Install all example packages from a repository checkout with `make install-examples`, or install one with `uv pip install -e examples/<name>`. LLM-backed examples also require provider credentials and the model adapter they use.
+| Example | Demonstrates |
+|---|---|
+| [`hello`](examples/hello/) | Minimal two-node graph |
+| [`devops`](examples/devops/) | Three deterministic analysis/report nodes around one LLM summary node |
+| [`weather`](examples/weather/) | Long-running task, commands, cancellation, checkpoints |
+| [`chatbot`](examples/chatbot/) | LangGraph interrupts and freeform input |
 
-| Example | Demonstrates | Setup | Run |
-|---|---|---|---|
-| [`hello`](examples/hello) | Minimal two-node LangGraph task | None | `hello run example hello --user-name Alice` |
-| [`weather`](examples/weather) | Long-running polling, commands, cancellation, and checkpoint retry | Network access | `weather run weather watch` |
-| [`chatbot`](examples/chatbot) | LangGraph interrupts and freeform input | Anthropic API key | `chatbot run bot chat` |
-| [`devops`](examples/devops) | Deterministic metrics analysis with model-based triage and summarization | API key plus model adapter | `devops run sre review` |
-| [`quality`](examples/quality) | Multi-model review fan-out, tool use, synthesis, and GitHub or local output | Provider keys and GitHub access | `quality run pr review --pr <url> --local` |
-
-The devops example captures the core Switchplane thesis: ordinary Python fetches and analyzes metrics, model calls make bounded judgment calls, and deterministic code compiles the report. The quality example demonstrates a larger graph with concurrent provider and review-domain branches. See its [example README](examples/quality/README.md) for the full architecture and security model.
-
-To run devops with its default model, install `langchain-anthropic`:
+Run the examples from a source checkout:
 
 ```bash
-uv pip install langchain-anthropic
-mkdir -p ~/.devops
+uv pip install -e . -e examples/hello -e examples/weather
+hello run example hello --user-name Alice
+weather run weather watch
 ```
 
-Then add the key to `~/.devops/config.toml` without replacing any existing settings:
+The `devops` and `chatbot` examples require a matching LangChain provider adapter and API key; see their package and config files before running them.
 
-```toml
-[llm]
-api_key = "sk-ant-..."
+## Scope and limits
+
+- Local, Unix-only runtime; no hosted service or account.
+- LangGraph is a deliberate dependency, not an abstraction hidden behind Switchplane.
+- Separate task processes are not security sandboxes and have no built-in resource quotas.
+- Durable lifecycle and application events do not include ephemeral token chunks or automatic graph-node tracing.
+- Checkpoint recovery is opt-in and operator-triggered.
+- The runtime handles how a task runs. Prompting, retrieval, memory, and domain logic remain application concerns.
+
+## Development
+
+```bash
+uv venv .venv
+source .venv/bin/activate
+uv pip install -e '.[test]'
+make test
 ```
 
-Run the review with `devops run sre review`, then inspect its stored report with `devops task show <task_id>`.
-
-## Project Status
-
-Switchplane is alpha software. It currently provides a local, POSIX-only runtime built on Unix sockets and process forking.
-
-- Python 3.12+
-- LangGraph-native task execution
-- Per-application daemon and runtime directory
-- No hosted service, account, or browser dashboard
-- Apache-2.0 license
-
-Switchplane deliberately handles how a task runs, not what it does. Your application owns prompts, tools, retrieval, domain rules, and graph design. Switchplane owns the process model and operational controls around them.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the [code of conduct](CODE_OF_CONDUCT.md). Licensed under [Apache 2.0](LICENSE).
