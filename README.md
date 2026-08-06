@@ -17,22 +17,6 @@ Switchplane is not a coding agent or a replacement for LangGraph. It is the loca
 
 > **Alpha software:** APIs, IPC protocols, and storage formats may change.
 
-## How it differs
-
-[OpenCode](https://opencode.ai/docs/) and [Pi](https://pi.dev/docs/latest) are capable, extensible coding-agent harnesses. Their primary abstraction is an interactive session driven by an LLM/tool loop. Switchplane's primary abstraction is an application task whose control flow is defined in code.
-
-| | OpenCode | Pi | Switchplane |
-|---|---|---|---|
-| Primary use | Coding agent | Coding-agent harness | Runtime for agentic applications |
-| Default control flow | Model-directed tool loop | Model-directed tool loop | Application-defined graph |
-| Durable unit | Session and messages | Session tree | Task, events, result, optional graph state |
-| Composition | Agents, subagents, plugins | Extensions, skills, subprocess patterns | Graph nodes and linked child tasks |
-| Recovery | Continue a session | Continue a session | Explicitly retry from an opt-in LangGraph checkpoint |
-| Task execution | Session/server runtime | In-process by default; isolation is opt-in | Supervised subprocess per task |
-| Operator surface | TUI, desktop, web, server, SDK | TUI, print, RPC, SDK | Generated per-app CLI and TUI |
-
-This is a difference in defaults, not capability. OpenCode plugins and Pi extensions can implement deterministic orchestration; Switchplane makes application-authored workflow topology and task operations the starting point. OpenCode and Pi are stronger choices for interactive coding, broad client surfaces, and more extensive documented agent customization. Switchplane is for workflows where the model should participate in the process, not own it.
-
 ## Quickstart
 
 Requires a Unix-like OS and Python 3.12+. The commands below use [uv](https://docs.astral.sh/uv/); equivalent `venv` and pip commands also work.
@@ -81,6 +65,22 @@ supervised task subprocess ----> LangGraph workflow
 Each application gets its own runtime under `~/.<app-name>/`. The control plane owns task and event persistence; task execution runs in a child process. A task has a stable ID, validated input, lifecycle status, structured result or error, and durable application events. Streaming token chunks are live-only.
 
 The process boundary protects the control plane from task crashes and permits bidirectional commands. It is **not** a security sandbox: task processes retain the current user's filesystem, environment, and network access.
+
+## How it differs
+
+[OpenCode](https://opencode.ai/docs/) and [Pi](https://pi.dev/docs/latest) are capable, extensible coding-agent harnesses. Their primary abstraction is an interactive session driven by an LLM/tool loop. Switchplane's primary abstraction is an application task whose control flow is defined in code.
+
+| | OpenCode | Pi | Switchplane |
+|---|---|---|---|
+| Primary use | Coding agent | Coding-agent harness | Runtime for agentic applications |
+| Default control flow | Model-directed tool loop | Model-directed tool loop | Application-defined graph |
+| Durable unit | Session and messages | Session tree | Task, events, result, optional graph state |
+| Composition | Agents, subagents, plugins | Extensions, skills, subprocess patterns | Graph nodes and linked child tasks |
+| Recovery | Continue a session | Continue a session | Explicitly retry from an opt-in LangGraph checkpoint |
+| Task execution | Session/server runtime | In-process by default; isolation is opt-in | Supervised subprocess per task |
+| Operator surface | TUI, desktop, web, server, SDK | TUI, print, RPC, SDK | Generated per-app CLI and TUI |
+
+This is a difference in defaults, not capability. OpenCode plugins and Pi extensions can implement deterministic orchestration; Switchplane makes application-authored workflow topology and task operations the starting point. OpenCode and Pi are stronger choices for interactive coding, broad client surfaces, and more extensive documented agent customization. Switchplane is for workflows where the model should participate in the process, not own it.
 
 ## Write a workflow
 
