@@ -459,4 +459,5 @@ class ReviewTask(Task):
         }
 
         result = await graph.ainvoke(initial)
+        ctx.stream_flush(result["report"])
         ctx.complete(result["report"])

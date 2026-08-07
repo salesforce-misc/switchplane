@@ -261,4 +261,12 @@ class WatchTask(Task):
             result = await graph.ainvoke(Command(resume=data), config)
             _report_progress(ctx, result)
 
+        weather = result.get("current_weather") or {}
+        ctx.stream_flush(
+            f"Final weather after {result['iteration']} checks: "
+            f"{describe_weather_code(weather.get('weather_code'))}, "
+            f"{weather.get('temperature')}°C, "
+            f"humidity {weather.get('humidity')}%, "
+            f"wind {weather.get('wind_speed')} km/h"
+        )
         ctx.complete({"final_weather": result.get("current_weather"), "total_checks": result["iteration"]})
