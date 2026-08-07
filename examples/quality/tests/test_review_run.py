@@ -125,9 +125,6 @@ class TestReviewTaskRun:
         async def fake_get_pr_diff(shell, repo, number):
             return "diff --git a/test.py b/test.py\n@@ -1 +1 @@\n+test"
 
-        async def fake_get_pr_head_sha(shell, repo, number):
-            return "fake-head-sha"
-
         async def fake_get_pr_author(shell, repo, number):
             return "author123"
 
@@ -150,7 +147,6 @@ class TestReviewTaskRun:
         monkeypatch.setattr(gh_module, "remove_worktree", fake_remove_worktree, raising=True)
         monkeypatch.setattr(gh_module, "clone_or_update_repo", fake_clone_or_update, raising=True)
         monkeypatch.setattr(gh_module, "get_pr_diff", fake_get_pr_diff, raising=True)
-        monkeypatch.setattr(gh_module, "get_pr_head_sha", fake_get_pr_head_sha, raising=True)
         monkeypatch.setattr(gh_module, "get_pr_author", fake_get_pr_author, raising=True)
         monkeypatch.setattr(gh_module, "get_authenticated_user", fake_get_authenticated_user, raising=True)
         monkeypatch.setattr(gh_module, "list_review_comments", fake_list_review_comments, raising=True)
@@ -165,7 +161,7 @@ class TestReviewTaskRun:
             baseline_calls.append((root, kwargs))
             return root / "baseline.json"
 
-        def fake_baseline_path(root, **kwargs):
+        def fake_baseline_path(root, repo, number, *, local=False):
             return root / "baseline.json"
 
         def fake_load_baseline(path):

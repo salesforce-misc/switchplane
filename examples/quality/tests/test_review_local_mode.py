@@ -176,9 +176,8 @@ class TestLocalModeBaseline:
             written_paths.append(path)
             return path
 
-        def fake_baseline_path(root, **kw):
-            local_flag = kw.get("local", False)
-            number = kw.get("number", 1)
+        def fake_baseline_path(root, repo, number, *, local=False):
+            local_flag = local
             if local_flag:
                 return root / f"pr-{number}.local.json"
             else:

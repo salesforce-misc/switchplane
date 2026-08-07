@@ -418,25 +418,6 @@ async def get_pr_diff(shell, repo: str, pr_number: int) -> str:
     return output
 
 
-async def get_pr_head_sha(shell, repo: str, pr_number: int) -> str:
-    """Get the head SHA of a PR via gh pr view.
-
-    Args:
-        shell: switchplane.Shell instance
-        repo: Repository identifier (e.g. "github.com/org/repo")
-        pr_number: PR number
-
-    Returns:
-        Head SHA (stripped of whitespace)
-    """
-    host, rest = repo.split("/", 1)
-    output = await shell.run(
-        ["gh", "pr", "view", str(pr_number), "-R", rest, "--json", "headRefOid", "-q", ".headRefOid"],
-        env=_gh_env(host),
-    )
-    return output.strip()
-
-
 async def get_pr_author(shell, repo: str, pr_number: int) -> str:
     """Get the author login of a PR via gh pr view.
 

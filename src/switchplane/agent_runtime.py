@@ -290,32 +290,26 @@ class AgentContext:
         provider = resolve_provider(self.config, name)
         final_model = model or provider.model
 
-        # Guard against credential-crossing when model= overrides across vendors.
-        # Safe when base_url is set AND the target adapter honours it (gateway case).
-        # Unsafe when base_url is None (direct-to-vendor) or when the target adapter
-        # discards base_url (Gemini), because the credential goes to the wrong endpoint.
+        # Guard against credential-crossing when model= overrides direct providers.
+        # A custom base URL is an explicit gateway boundary and may route custom IDs;
+        # without one, both models must resolve to the same recognized vendor.
         if model:
             original_vendor = get_model_vendor(provider.model)
             override_vendor = get_model_vendor(model)
 
-            if original_vendor and override_vendor and original_vendor != override_vendor:
-                # Crossing vendor boundary with model= override
-                if not provider.base_url:
-                    # Direct-to-vendor: wrong credential will be sent to wrong vendor
-                    raise ValueError(
-                        f"Cannot override model from {provider.model!r} to {model!r}: "
-                        f"crossing vendor boundary without base_url would send "
-                        f"{original_vendor}:* credentials to {override_vendor}:* adapter. "
-                        f"Use a separate [llm.providers.<name>] entry with its own credential."
-                    )
-                elif override_vendor == "gemini":
-                    # Gemini adapter discards base_url, so gateway bypass + credential leak
-                    raise ValueError(
-                        f"Cannot override model to {model!r}: the Gemini adapter discards "
-                        f"base_url, so your gateway token would be sent to Google's public "
-                        f"endpoint instead of {provider.base_url!r}. "
-                        f"Use a separate [llm.providers.<name>] entry."
-                    )
+            if not provider.base_url and (
+                not original_vendor or not override_vendor or original_vendor != override_vendor
+            ):
+                raise ValueError(
+                    f"Cannot override model from {provider.model!r} to {model!r} without base_url: "
+                    "direct providers only allow recognized models from the same vendor. "
+                    "Use a separate [llm.providers.<name>] entry with its own credential."
+                )
+            if provider.base_url and override_vendor == "gemini":
+                raise ValueError(
+                    f"Cannot override model to {model!r}: the stock Gemini adapter does not support "
+                    f"base_url={provider.base_url!r}. Use a provider-specific integration for that gateway."
+                )
 
         return build_llm(final_model, provider.api_key, provider.base_url)
 

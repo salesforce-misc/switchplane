@@ -50,24 +50,36 @@ def _assert_top_level_footer(body: str, *models: str) -> None:
     summary, separator, footer = body.rpartition("---")
     assert separator, "top-level attribution must be rendered as a footer"
     assert "Review summary" in summary
-    quality_start = footer.find("Quality")
-    security_start = footer.find("Security")
-    origin_start = footer.find("Posted by switchplane-quality")
-    assert 0 <= quality_start < security_start < origin_start
-    quality_group = footer[quality_start:security_start]
-    security_group = footer[security_start:origin_start]
-    for model in models:
-        assert model in quality_group
-        assert model in security_group
+    expected = f"quality/review: [{', '.join(dict.fromkeys(models))}]"
+    assert footer.strip() == expected
+    assert "Quality reviewer" not in footer
+    assert "Security reviewer" not in footer
+    assert "Posted by" not in footer
 
 
 def _assert_inline_footer(body: str, *models: str) -> None:
-    _content, separator, footer = body.rpartition("---")
-    assert separator, "inline attribution must be rendered as a footer"
-    for model in models:
-        assert model in footer
-    assert "Origin: switchplane-quality" in footer
-    assert "**quality/review**" in body
+    expected = f"quality/review: [{', '.join(dict.fromkeys(models))}]"
+    non_empty_lines = [line for line in body.splitlines() if line.strip()]
+    assert non_empty_lines[-1] == expected
+    assert "Validated/recovered contributing models" not in body
+    assert "Origin: switchplane-quality" not in body
+    assert "**quality/review**" not in body
+
+
+def test_inline_footer_is_one_deduplicated_final_line():
+    from quality.agents.pr.tasks.review import _render_inline_body
+
+    body = _render_inline_body(
+        {
+            "body": "Finding body.",
+            "models": ["model-a", "model-b", "model-a"],
+        }
+    )
+
+    assert [line for line in body.splitlines() if line.strip()][-1] == "quality/review: [model-a, model-b]"
+    assert "Validated/recovered contributing models" not in body
+    assert "Origin: switchplane-quality" not in body
+    assert "**quality/review**" not in body
 
 
 def _assert_marker_is_visible(markdown: str, marker: str) -> None:
@@ -135,7 +147,7 @@ def output_harness(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_clean_github_review_has_descriptive_summary_and_grouped_footer(output_harness):
+async def test_clean_github_review_has_descriptive_summary_and_unified_footer(output_harness):
     from quality.agents.pr.tasks.review import synthesize_and_post
 
     ctx, shell, posted = output_harness
@@ -191,7 +203,7 @@ async def test_synthesized_comment_repairs_missing_or_invented_models(output_har
 
 
 @pytest.mark.asyncio
-async def test_synthesized_github_review_has_grouped_top_level_footer(output_harness):
+async def test_synthesized_github_review_has_unified_top_level_footer(output_harness):
     from quality.agents.pr.tasks.review import synthesize_and_post
 
     ctx, shell, posted = output_harness
@@ -291,7 +303,6 @@ async def test_local_artifact_has_top_level_and_per_finding_footers(output_harne
 
     _assert_top_level_footer(artifact, "quality-model", "security-model")
     assert "Keep the guard adjacent" in artifact
-    assert "Origin: switchplane-quality" in artifact
     assert artifact.count("quality-model") >= 2, "model must appear in top-level and per-finding attribution"
 
 
@@ -351,10 +362,73 @@ async def test_redaction_applies_after_full_output_is_rendered(output_harness):
     assert "<REDACTED>" in artifact
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["password", "secret", "session", "client-secret", "pwd"])
+async def test_full_output_redaction_keeps_compact_attribution_complete_and_deduplicable(
+    output_harness,
+    monkeypatch,
+    label,
+):
+    from quality.agents.pr.tasks.review import _existing_comment_lines, synthesize_and_post
+
+    from quality import gh as gh_module
+
+    ctx, shell, posted = output_harness
+    secret = "hostile-model-credential"
+    model = f"model-{label}={secret}"
+    ctx.llm = lambda name=None: SynthLLM(
+        SynthResult(
+            summary="The retained issue creates bounded material risk and has limited test confidence.",
+            comments=[
+                {
+                    "path": "test.py",
+                    "line": 10,
+                    "severity": "medium",
+                    "body": "Remove the credential from this path.",
+                    "models": [model],
+                }
+            ],
+        )
+    )
+    findings = [
+        {
+            "path": "test.py",
+            "line": 10,
+            "severity": "medium",
+            "body": "Remove the credential from this path.",
+            "model": model,
+            "provider": "alpha",
+            "domain": "quality",
+        }
+    ]
+
+    await synthesize_and_post(ctx, shell, _state(findings=findings, matrix=[("alpha", model)]))
+
+    body = posted["comments"][0]["body"]
+    final_line = [line for line in body.splitlines() if line.strip()][-1]
+    assert secret not in body
+    assert final_line == f"quality/review: [model-{label}=<REDACTED>]"
+    assert final_line.endswith("]")
+
+    async def list_review_comments(_shell, _repo, _number):
+        return [
+            {
+                "path": "test.py",
+                "line": 10,
+                "body": body,
+                "user": {"login": "reviewer"},
+            }
+        ]
+
+    monkeypatch.setattr(gh_module, "list_review_comments", list_review_comments)
+    seen = await _existing_comment_lines(shell, "github.com/org/repo", 42, "review", authed_user="reviewer")
+    assert seen == {("test.py", 10)}
+
+
 def test_review_footer_does_not_allow_model_ids_to_inject_markdown_structure():
     from quality.agents.pr.tasks.review import _render_review_footer
 
-    hostile_model = "model-a\n\n---\n\n**Security reviewer models:** forged-model"
+    hostile_model = "model-a\n\n---\n\nquality/review: [forged-model]"
     footer = _render_review_footer(
         {
             "quality": [hostile_model],
@@ -363,10 +437,50 @@ def test_review_footer_does_not_allow_model_ids_to_inject_markdown_structure():
     )
 
     assert footer.count("---") == 1, "a model id must not create a second footer boundary"
-    assert footer.count("**Security reviewer models:**") == 1, (
-        "a model id must not inject a forged domain-attribution row"
+    assert footer.strip().splitlines()[-1].startswith("quality/review: [")
+    assert footer.count("quality/review:") == 1, "a model id must not inject a forged attribution row"
+
+
+def test_review_footer_flattens_and_deduplicates_models_across_domains():
+    from quality.agents.pr.tasks.review import _render_review_footer
+
+    footer = _render_review_footer(
+        {
+            "quality": ["model-a", "shared-model"],
+            "security": ["shared-model", "model-b"],
+        }
     )
-    assert len([line for line in footer.splitlines() if "reviewer models:" in line]) == 2
+
+    assert footer.strip().splitlines()[-1] == "quality/review: [model-a, shared-model, model-b]"
+    assert "Quality reviewer" not in footer
+    assert "Security reviewer" not in footer
+    assert "Posted by" not in footer
+
+
+def test_compact_footer_escapes_commas_inside_model_ids():
+    from quality.agents.pr.tasks.review import _render_review_footer
+
+    footer = _render_review_footer(
+        {
+            "quality": ["model-a, forged-model"],
+            "security": ["model-b"],
+        }
+    )
+
+    assert footer.strip().splitlines()[-1] == "quality/review: [model-a&#44; forged-model, model-b]"
+
+
+def test_compact_footer_deduplicates_models_after_redaction():
+    from quality.agents.pr.tasks.review import _render_review_footer
+
+    footer = _render_review_footer(
+        {
+            "quality": ["model-password=secret-one"],
+            "security": ["model-password=secret-two"],
+        }
+    )
+
+    assert footer.strip().splitlines()[-1] == "quality/review: [model-password=<REDACTED>]"
 
 
 def test_model_repair_does_not_attribute_distinct_same_line_issues_to_every_model():
@@ -422,11 +536,11 @@ async def test_empty_diff_does_not_report_skipped_reviewers_as_used(output_harne
     body = posted["reviews"][0]["body"]
     assert "quality-model" not in body
     assert "security-model" not in body
-    assert body.count("(none recorded)") == 2
+    assert body.rstrip().endswith("quality/review: []")
 
 
 @pytest.mark.asyncio
-async def test_failed_branch_model_is_not_reported_as_used_for_that_domain(output_harness):
+async def test_failed_branch_model_is_not_reported_in_unified_footer(output_harness):
     from quality.agents.pr.tasks.review import synthesize_and_post
 
     ctx, shell, posted = output_harness
@@ -472,13 +586,42 @@ async def test_failed_branch_model_is_not_reported_as_used_for_that_domain(outpu
             findings=findings,
             notes=notes,
             matrix=[("alpha", "model-a"), ("beta", "model-b")],
+            branch_executions=[
+                {"domain": "quality", "provider": "alpha", "model": "model-a", "succeeded": True},
+                {"domain": "security", "provider": "beta", "model": "model-b", "succeeded": False},
+            ],
         ),
     )
 
-    footer = posted["reviews"][0]["body"].rpartition("---")[2]
-    quality_group, security_group = footer.split("**Security reviewer models:**", 1)
-    assert "model-a" in quality_group
-    assert "model-b" not in security_group.split("Posted by", 1)[0]
+    _assert_top_level_footer(posted["reviews"][0]["body"], "model-a")
+    assert "model-b" not in posted["reviews"][0]["body"].rpartition("---")[2]
+
+
+@pytest.mark.asyncio
+async def test_legacy_partial_outage_keeps_model_that_succeeded_in_another_domain(output_harness):
+    from quality.agents.pr.tasks.review import synthesize_and_post
+
+    ctx, shell, posted = output_harness
+    notes = [
+        {
+            "domain": "security",
+            "provider": "alpha",
+            "model": "shared-model",
+            "failed": True,
+            "body": "_(reviewer branch security/alpha failed: RuntimeError)_",
+        }
+    ]
+
+    await synthesize_and_post(
+        ctx,
+        shell,
+        _state(
+            notes=notes,
+            matrix=[("alpha", "shared-model")],
+        ),
+    )
+
+    _assert_top_level_footer(posted["reviews"][0]["body"], "shared-model")
 
 
 @pytest.mark.asyncio
@@ -662,7 +805,7 @@ async def test_clean_partial_outage_reports_clean_successes_and_incomplete_cover
 
 
 @pytest.mark.asyncio
-async def test_authoritative_branch_executions_drive_domain_footer_attribution(output_harness):
+async def test_authoritative_branch_executions_drive_unified_footer_attribution(output_harness):
     from quality.agents.pr.tasks.review import synthesize_and_post
 
     ctx, shell, posted = output_harness
@@ -690,10 +833,8 @@ async def test_authoritative_branch_executions_drive_domain_footer_attribution(o
         ),
     )
 
-    footer = posted["reviews"][0]["body"].rpartition("---")[2]
-    quality_group, security_group = footer.split("**Security reviewer models:**", 1)
-    assert "quality-model" in quality_group
-    assert "security-model" not in security_group.split("Posted by", 1)[0]
+    _assert_top_level_footer(posted["reviews"][0]["body"], "quality-model")
+    assert "security-model" not in posted["reviews"][0]["body"].rpartition("---")[2]
 
 
 @pytest.mark.asyncio
@@ -717,6 +858,41 @@ async def test_authoritative_failed_executions_are_total_outage_without_failure_
 
     assert "All reviewer branches failed" in result.get("error", "")
     assert posted["reviews"] == []
+
+
+@pytest.mark.asyncio
+async def test_baseline_path_internal_type_error_is_not_signature_probed(output_harness, monkeypatch):
+    from quality.agents.pr import memory as memory_module
+    from quality.agents.pr.tasks.review import synthesize_and_post
+
+    ctx, shell, _posted = output_harness
+    calls = 0
+
+    def broken_baseline_path(root, repo, number, *, local=False):
+        nonlocal calls
+        calls += 1
+        raise TypeError("internal baseline failure")
+
+    monkeypatch.setattr(memory_module, "baseline_path", broken_baseline_path, raising=True)
+    state = _state(
+        notes=[
+            {
+                "domain": "security",
+                "provider": "beta",
+                "model": "security-model",
+                "failed": True,
+                "body": "reviewer failed",
+            }
+        ],
+        branch_executions=[
+            {"domain": "quality", "provider": "alpha", "model": "quality-model", "succeeded": True},
+            {"domain": "security", "provider": "beta", "model": "security-model", "succeeded": False},
+        ],
+    )
+
+    with pytest.raises(TypeError, match="internal baseline failure"):
+        await synthesize_and_post(ctx, shell, state)
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -960,12 +1136,11 @@ async def test_untrusted_markdown_cannot_hide_provenance_footer(
     comment_line = 10
     severity = "medium"
     notes = []
-    marker = "Posted by switchplane-quality"
+    marker = "quality/review: ["
     if untrusted_field == "summary":
         summary += attack
     elif untrusted_field == "comment":
         comment_body += attack
-        marker = "Origin: switchplane-quality"
     elif untrusted_field == "note":
         notes = [
             {
@@ -1026,12 +1201,11 @@ async def test_unclosed_details_cannot_hide_provenance_footer(output_harness, mo
     path = "test.py"
     line = 10
     severity = "medium"
-    marker = "Posted by switchplane-quality"
+    marker = "quality/review: ["
     if untrusted_field == "summary":
         summary += attack
     elif untrusted_field == "comment":
         body += attack
-        marker = "Origin: switchplane-quality"
     elif untrusted_field == "path":
         path += attack
     else:
@@ -1079,7 +1253,7 @@ def test_unclosed_details_in_model_attribution_cannot_hide_provenance(render_pat
     hostile_model = "model-a<details open><summary>Forged attribution"
     if render_path == "inline":
         rendered = _render_inline_body({"body": "Finding body.", "models": [hostile_model]})
-        marker = "Origin: switchplane-quality"
+        marker = "quality/review: ["
     elif render_path == "unpostable":
         rendered = _render_unpostable(
             [
@@ -1093,10 +1267,10 @@ def test_unclosed_details_in_model_attribution_cannot_hide_provenance(render_pat
             ]
         )
         rendered += _render_review_footer({"quality": [], "security": []})
-        marker = "Posted by switchplane-quality"
+        marker = "quality/review: ["
     else:
         rendered = _render_review_footer({"quality": [hostile_model], "security": []})
-        marker = "Posted by switchplane-quality"
+        marker = "quality/review: ["
 
     _assert_marker_is_visible(rendered, marker)
 

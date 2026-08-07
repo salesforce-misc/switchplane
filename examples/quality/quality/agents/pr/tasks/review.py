@@ -720,9 +720,9 @@ def _comments_from_equivalence_clusters(findings: list[dict]) -> list[dict]:
                 "path": first.get("path") or "",
                 "line": _coerce_line(first.get("line")),
                 "severity": max(severities, key=lambda value: _SEVERITY_ORDER.get(value, 2)),
-                "body": "\n\n".join(_unique_models(item.get("body", "") for item in cluster)),
-                "models": _unique_models(item.get("model") for item in cluster),
-                "source_ids": _unique_models(item.get("source_id") for item in cluster),
+                "body": "\n\n".join(_unique_nonempty(item.get("body", "") for item in cluster)),
+                "models": _unique_nonempty(item.get("model") for item in cluster),
+                "source_ids": _unique_nonempty(item.get("source_id") for item in cluster),
             }
         )
     return comments
@@ -739,21 +739,18 @@ def _model_attrib(models: list[str]) -> str:
     Returns:
         Attribution string like " [model-1 | model-2]" or "" if empty
     """
-    uniq: list[str] = []
-    for m in models:
-        if m and m not in uniq:
-            uniq.append(m)
+    uniq = _safe_model_ids(models)
     if not uniq:
         return ""
-    return f" [{' | '.join(_safe_model_id(model) for model in uniq)}]"
+    return f" [{' | '.join(uniq)}]"
 
 
-def _unique_models(models) -> list[str]:
-    """Return non-empty model names once, preserving their input order."""
+def _unique_nonempty(values) -> list[str]:
+    """Return non-empty values once, preserving their input order."""
     unique: list[str] = []
-    for model in models:
-        if model and model not in unique:
-            unique.append(model)
+    for value in values:
+        if value and value not in unique:
+            unique.append(value)
     return unique
 
 
@@ -777,7 +774,7 @@ def _successful_branch_models(
             model = execution.get("model")
             if domain in result and model:
                 result[domain].append(model)
-        return {domain: _unique_models(models) for domain, models in result.items()}, bool(successful)
+        return {domain: _unique_nonempty(models) for domain, models in result.items()}, bool(successful)
 
     failed = {(note.get("domain"), note.get("provider"), note.get("model")) for note in notes if note.get("failed")}
     successful_items = [*findings, *(note for note in notes if not note.get("failed"))]
@@ -789,13 +786,14 @@ def _successful_branch_models(
 
     # Legacy clean states have no per-branch records. A configured matrix on a
     # non-empty diff represents the domain cross-product, except combinations
-    # explicitly identified by failed notes.
+    # explicitly identified by failed notes. Failures are tuple-specific: the same
+    # provider/model may still have completed successfully in another domain.
     for domain in DOMAINS:
         for provider, model in matrix:
             if (domain, provider, model) not in failed:
                 result[domain].append(model)
 
-    models_by_domain = {domain: _unique_models(models) for domain, models in result.items()}
+    models_by_domain = {domain: _unique_nonempty(models) for domain, models in result.items()}
     return models_by_domain, any(models_by_domain.values())
 
 
@@ -806,21 +804,25 @@ def _safe_model_id(model: object) -> str:
     value = redact_module.redact_secrets(str(model))
     value = re.sub(r"\s+", " ", value).strip()
     value = value.replace("---", "- - -")
+    value = re.sub(r"quality/review:", "quality/review&#58;", value, flags=re.IGNORECASE)
     value = escape(value, quote=False).replace("&lt;REDACTED&gt;", "<REDACTED>")
+    value = value.replace("&amp;#58;", "&#58;")
+    value = value.replace(",", "&#44;")
     for char in ("\\", "`", "*", "_", "[", "]", "|"):
         value = value.replace(char, f"\\{char}")
     return value
 
 
+def _safe_model_ids(models) -> list[str]:
+    """Safely render model IDs, then de-duplicate equivalent output in order."""
+    return _unique_nonempty(_safe_model_id(model) for model in models if model)
+
+
 def _render_review_footer(models_by_domain: dict[str, list[str]]) -> str:
     """Render deterministic top-level reviewer attribution."""
-    lines = ["", "---", ""]
-    for domain in DOMAINS:
-        models = models_by_domain.get(domain, [])
-        value = " | ".join(_safe_model_id(model) for model in models) if models else "(none recorded)"
-        lines.append(f"**{domain.title()} reviewer models:** {value}")
-    lines.extend(["", "Posted by switchplane-quality"])
-    return "\n".join(lines)
+    models = _safe_model_ids(model for domain in DOMAINS for model in models_by_domain.get(domain, []))
+    value = ", ".join(models)
+    return f"\n\n---\n\nquality/review: [{value}]"
 
 
 def _repair_comment_models(comments: list[dict], findings: list[dict]) -> None:
@@ -845,14 +847,14 @@ def _repair_comment_models(comments: list[dict], findings: list[dict]) -> None:
             candidates = [finding for finding in findings if (finding.get("path") or "") == path]
         if not candidates:
             candidates = findings
-        supported = _unique_models(finding.get("model") for finding in candidates)
-        retained = [model for model in _unique_models(comment.get("models", [])) if model in supported]
+        supported = _unique_nonempty(finding.get("model") for finding in candidates)
+        retained = [model for model in _unique_nonempty(comment.get("models", [])) if model in supported]
         if not retained:
             comment["models"] = supported
             continue
 
         comment_body = normalized_body(comment.get("body", ""))
-        similar_models = _unique_models(
+        similar_models = _unique_nonempty(
             finding.get("model")
             for finding in candidates
             if comment_body
@@ -869,7 +871,7 @@ def _validate_sourced_comments(comments: list[dict], findings: list[dict]) -> li
     findings_by_id = {finding["source_id"]: finding for finding in findings if finding.get("source_id")}
     validated: list[dict] = []
     for comment in comments:
-        source_ids = _unique_models(comment.get("source_ids", []))
+        source_ids = _unique_nonempty(comment.get("source_ids", []))
         valid_ids = [source_id for source_id in source_ids if source_id in findings_by_id]
         if not valid_ids:
             continue
@@ -882,10 +884,10 @@ def _validate_sourced_comments(comments: list[dict], findings: list[dict]) -> li
             for finding in findings_by_id.values()
             if any(_equivalent_findings(finding, cited_finding) for cited_finding in cited)
         ]
-        source_ids = _unique_models(finding.get("source_id") for finding in sources)
+        source_ids = _unique_nonempty(finding.get("source_id") for finding in sources)
         severities = [str(finding.get("severity", "medium")).strip().lower() for finding in sources]
         severity = max(severities, key=lambda value: _SEVERITY_ORDER.get(value, 2))
-        raw_bodies = _unique_models(finding.get("body", "") for finding in sources)
+        raw_bodies = _unique_nonempty(finding.get("body", "") for finding in sources)
         synthesized_body = str(comment.get("body", ""))
         normalized_synthesized = _normalized_body(synthesized_body)
         body_matches_source = bool(raw_bodies and normalized_synthesized) and all(
@@ -903,7 +905,7 @@ def _validate_sourced_comments(comments: list[dict], findings: list[dict]) -> li
                 "line": _coerce_line(cited[0].get("line")),
                 "severity": severity,
                 "body": synthesized_body if body_matches_source else "\n\n".join(raw_bodies),
-                "models": _unique_models(finding.get("model") for finding in sources),
+                "models": _unique_nonempty(finding.get("model") for finding in sources),
                 "source_ids": source_ids,
             }
         )
@@ -916,9 +918,10 @@ def _validate_sourced_comments(comments: list[dict], findings: list[dict]) -> li
 
 
 def _close_untrusted_markdown(value: object) -> str:
-    """Neutralize structures that could absorb deterministic provenance Markdown."""
+    """Neutralize structures and reserved attribution syntax in untrusted Markdown."""
     text = str(value)
     text = escape(text, quote=False)
+    text = re.sub(r"(?i)quality/review:", "quality/review&#58;", text)
     return re.sub(r"(?m)^( {0,3})(`{3,}|~{3,})", r"\1\\\2", text)
 
 
@@ -947,15 +950,10 @@ def _descriptive_summary(summary: object, findings: list[dict]) -> str:
 
 
 def _render_inline_body(comment: dict) -> str:
-    """Render a complete inline finding with reviewer and origin attribution."""
-    models = comment.get("models", [])
-    value = " | ".join(_safe_model_id(model) for model in models) if models else "(none recorded)"
-    return (
-        f"{_close_untrusted_markdown(comment.get('body', ''))}\n\n---\n"
-        f"Validated/recovered contributing models: {value}\n\n"
-        "Origin: switchplane-quality\n\n"
-        "**quality/review**"
-    )
+    """Render a complete inline finding with compact reviewer attribution."""
+    models = _safe_model_ids(comment.get("models", []))
+    value = ", ".join(models)
+    return f"{_close_untrusted_markdown(comment.get('body', ''))}\n\nquality/review: [{value}]"
 
 
 def _coerce_line(line: object) -> int | None:
@@ -1056,7 +1054,7 @@ async def _existing_comment_lines(
     """(path, line) pairs already carrying a prior comment from this task.
 
     Used to skip re-posting still-valid findings on a follow-up run. Requires BOTH:
-    - the task-specific marker "**quality/{task_name}**"
+    - a complete task-specific ``quality/{task_name}: [...]`` final non-empty line
     - the comment to be authored by authed_user
 
     The marker is publicly visible, so the PR author could pre-seed a comment
@@ -1065,7 +1063,8 @@ async def _existing_comment_lines(
     is unknown we skip dedup entirely rather than trust the spoofable marker alone.
 
     Args:
-        repo_path: Path to the repository (unused in production, kept for test compat)
+        shell: Shell used to query existing review comments
+        repo: Repository identifier
         pr_number: PR number
         task_name: Task name for marker (e.g. "review")
         authed_user: Authenticated user login
@@ -1078,7 +1077,7 @@ async def _existing_comment_lines(
     if not authed_user:
         return set()
 
-    marker = f"**quality/{task_name}**"
+    marker = re.compile(rf"^quality/{re.escape(task_name)}: \[[^\r\n]*\]$")
     try:
         comments = await gh_module.list_review_comments(shell, repo, pr_number)
     except Exception:
@@ -1096,8 +1095,10 @@ async def _existing_comment_lines(
         # GitHub API returns user as a dict with {"login": ..., "id": ..., ...}.
         # Extract login string for comparison. Tolerate flat string for test stubs.
         login = user_obj.get("login") if isinstance(user_obj, dict) else user_obj
+        non_empty_lines = [candidate.strip() for candidate in body.splitlines() if candidate.strip()]
+        has_marker = bool(non_empty_lines and marker.fullmatch(non_empty_lines[-1]))
 
-        if path and line is not None and marker in body and login and login == authed_user:
+        if path and line is not None and has_marker and login and login == authed_user:
             seen.add((path, line))
     return seen
 
@@ -1253,15 +1254,7 @@ async def synthesize_and_post(ctx: AgentContext, shell: Shell, state: dict | Rev
     failed_domains.update(note.get("domain") for note in notes if note.get("failed") and note.get("domain"))
     prior_baseline = None
     if failed_domains:
-        try:
-            prior_path = memory_module.baseline_path(ctx.runtime_dir, repo, number, local=local)
-        except TypeError:
-            # Some embedding/test adapters expose the older keyword-only or
-            # no-local seam; production memory.baseline_path uses the first form.
-            try:
-                prior_path = memory_module.baseline_path(ctx.runtime_dir, repo=repo, number=number, local=local)
-            except TypeError:
-                prior_path = memory_module.baseline_path(ctx.runtime_dir, repo, number)
+        prior_path = memory_module.baseline_path(ctx.runtime_dir, repo, number, local=local)
         prior_baseline = memory_module.load_baseline(prior_path)
     models_by_domain, any_branch_succeeded = _successful_branch_models(matrix, findings, notes, branch_executions, diff)
     review_footer = _render_review_footer(models_by_domain)

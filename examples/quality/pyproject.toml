@@ -7,7 +7,7 @@ name = "quality"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "switchplane[llm]",
+    "switchplane[llm]>=0.11.0",
     "langchain-anthropic",
     "langchain-openai",
 ]
@@ -20,3 +20,6 @@ packages = ["quality"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "quality/config.toml" = "quality/config.toml"
+
+[tool.uv.sources]
+switchplane = { path = "../..", editable = true }

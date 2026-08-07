@@ -133,6 +133,8 @@ def build_llm(
             kwargs["anthropic_api_url"] = base_url
         return ChatAnthropic(**kwargs)
     elif vendor == "gemini":
+        if base_url:
+            raise ValueError("Gemini models do not support base_url with the stock LangChain adapter")
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
@@ -165,6 +167,68 @@ def build_llm(
 _MAX_TOOL_RESULT_CHARS = 8_000
 _MAX_REPEAT_CALLS = 3
 _TRUNCATION_MARKER = "\n\n[...truncated: content exceeded context window...]"
+_MAX_INPUT_CHARS = 2_000_000
+_MIN_INPUT_TOKENS = 32
+_MIN_CONTEXT_HEADROOM_TOKENS = 16
+_CONTEXT_HEADROOM_RATIO = 0.05
+_MAX_STRUCTURED_ITEMS = 10_000
+
+
+def _structured_content_size(content: list, limit: int) -> tuple[int, bool, bool]:
+    """Boundedly inspect content blocks without serializing provider structures.
+
+    Returns ``(character_count, text_only, exceeded)``. Traversal stops as soon
+    as the character or item cap is exceeded, preventing pre-count CPU growth.
+    """
+    characters = 0
+    items = 0
+    text_only = True
+    stack = list(reversed(content))
+    while stack:
+        value = stack.pop()
+        items += 1
+        if items > _MAX_STRUCTURED_ITEMS:
+            return characters, text_only, True
+        if isinstance(value, str):
+            characters += len(value)
+        elif isinstance(value, dict):
+            if value.get("type") != "text" or not isinstance(value.get("text"), str):
+                text_only = False
+            stack.extend(reversed(list(value.values())))
+        elif isinstance(value, list):
+            stack.extend(reversed(value))
+        else:
+            text_only = False
+        if characters > limit:
+            return characters, text_only, True
+    return characters, text_only, False
+
+
+def _truncate_text_blocks(content: list, max_chars: int) -> list:
+    """Copy and truncate supported LangChain text blocks, preserving list shape."""
+    remaining = max(0, max_chars - len(_TRUNCATION_MARKER))
+    truncated: list = []
+    marker_added = False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+            raise ValueError(
+                "Oversized structured or multimodal content cannot be safely bounded to the context budget"
+            )
+        text = block["text"]
+        if remaining >= len(text):
+            truncated.append(dict(block))
+            remaining -= len(text)
+            continue
+        truncated.append({**block, "text": text[:remaining] + _TRUNCATION_MARKER})
+        marker_added = True
+        break
+    if not marker_added:
+        if truncated:
+            last = truncated[-1]
+            last["text"] = last["text"][:remaining] + _TRUNCATION_MARKER
+        else:
+            truncated.append({"type": "text", "text": _TRUNCATION_MARKER})
+    return truncated
 
 
 def extract_response_text(content) -> str:
@@ -235,8 +299,13 @@ async def run_tool_loop(
         generous enough for legitimate multi-step work while bounding runaway
         loops on attacker-influenced input. On hitting the cap, returns the
         last response without raising (preserving any findings recorded so far).
+
+    Raises
+    ------
+    ValueError:
+        If the model context window cannot fit a minimally useful input budget.
     """
-    from langchain_core.messages.utils import trim_messages
+    from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
     turn = 0
     last_sig: str | None = None
@@ -250,36 +319,80 @@ async def run_tool_loop(
         if messages:
             anchor = messages[0]  # the initial HumanMessage / prompt
             window = context_window(model_name)
-            # Bound the anchor itself — the tail is budgeted by trim_messages but the anchor
-            # is not, and the reviewer's prompt embeds an unbounded, attacker-controlled diff.
-            # Approximate 4 chars/token to match trim_messages(token_counter="approximate").
-            # Handle both dict messages (tests) and LangChain Message objects (production).
+            headroom = max(_MIN_CONTEXT_HEADROOM_TOKENS, int(window * _CONTEXT_HEADROOM_RATIO))
+            input_budget = window - headroom
+            if input_budget < _MIN_INPUT_TOKENS:
+                raise ValueError(
+                    f"Context window for {model_name!r} is too small: {window} tokens leaves "
+                    f"no safe input budget after {headroom} tokens of reserved headroom"
+                )
+
+            # Bound attacker-controlled input once before approximate token counting. This
+            # prevents token-estimation CPU from scaling with an arbitrarily large PR diff.
             if isinstance(anchor, dict):
                 content = anchor.get("content", "")
             else:
-                content = anchor.content if isinstance(anchor.content, str) else str(anchor.content)
-            max_chars = window * 4 - len(_TRUNCATION_MARKER)
-            if len(content) > max_chars:
-                # Truncate from the tail: instructions lead the prompt, the diff trails it.
+                content = anchor.content
+            hard_char_limit = min(_MAX_INPUT_CHARS, max(0, input_budget * 3 - len(_TRUNCATION_MARKER)))
+            if isinstance(content, list):
+                _characters, text_only, exceeded = _structured_content_size(content, hard_char_limit)
+                if exceeded:
+                    if not text_only:
+                        raise ValueError(
+                            "Oversized structured or multimodal content cannot be safely bounded to the context budget"
+                        )
+                    content = _truncate_text_blocks(content, hard_char_limit)
+                    if isinstance(anchor, dict):
+                        anchor = {**anchor, "content": content}
+                    else:
+                        anchor = anchor.model_copy(update={"content": content})
+            elif not isinstance(content, str):
+                raise ValueError("Unsupported structured content cannot be safely bounded to the context budget")
+            elif len(content) > hard_char_limit:
+                content = content[:hard_char_limit] + _TRUNCATION_MARKER
                 if isinstance(anchor, dict):
-                    anchor = {**anchor, "content": content[:max_chars] + _TRUNCATION_MARKER}
+                    anchor = {**anchor, "content": content}
                 else:
-                    anchor = anchor.model_copy(update={"content": content[:max_chars] + _TRUNCATION_MARKER})
-            tail = trim_messages(
-                messages[1:],
-                max_tokens=window,
-                token_counter="approximate",
-                strategy="last",
-                include_system=True,
-                start_on="ai",  # tail must begin at an AI turn, not a dangling ToolMessage
-            )
-            # If the (possibly-truncated) anchor already fills the window, drop the tail so the
-            # total stays within bound — the prompt matters more than stale tool history.
-            anchor_content = anchor.get("content", "") if isinstance(anchor, dict) else str(anchor.content)
-            if len(anchor_content) // 4 >= window:
-                trimmed = [anchor]
+                    anchor = anchor.model_copy(update={"content": content})
+
+            anchor_tokens = count_tokens_approximately([anchor])
+            if anchor_tokens > input_budget:
+                # The deterministic character bound handles ordinary text. This fallback
+                # accounts for message metadata and unusually token-dense content once.
+                if isinstance(content, list):
+                    content_chars, text_only, _exceeded = _structured_content_size(content, _MAX_INPUT_CHARS)
+                    if not text_only:
+                        raise ValueError(
+                            "Oversized structured or multimodal content cannot be safely bounded to the context budget"
+                        )
+                    adjusted_limit = max(0, int(content_chars * input_budget / anchor_tokens))
+                    content = _truncate_text_blocks(content, adjusted_limit)
+                else:
+                    adjusted_limit = max(0, int(len(content) * input_budget / anchor_tokens) - len(_TRUNCATION_MARKER))
+                    content = content[:adjusted_limit] + _TRUNCATION_MARKER
+                if isinstance(anchor, dict):
+                    anchor = {**anchor, "content": content}
+                else:
+                    anchor = anchor.model_copy(update={"content": content})
+                anchor_tokens = count_tokens_approximately([anchor])
+                if anchor_tokens > input_budget:
+                    raise ValueError(
+                        f"Initial message for {model_name!r} cannot fit the safe {input_budget}-token input budget"
+                    )
+
+            tail_budget = input_budget - anchor_tokens
+            if tail_budget:
+                tail = trim_messages(
+                    messages[1:],
+                    max_tokens=tail_budget,
+                    token_counter="approximate",
+                    strategy="last",
+                    include_system=True,
+                    start_on="ai",  # tail must begin at an AI turn, not a dangling ToolMessage
+                )
             else:
-                trimmed = [anchor, *tail]
+                tail = []
+            trimmed = [anchor, *tail]
         else:
             trimmed = []
         messages.clear()

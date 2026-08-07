@@ -29,6 +29,8 @@ uv pip install -e ../.. -e .
 
 Quality ships with app defaults at `examples/quality/quality/config.toml` that define the provider pool and default model. You provide your personal config at `~/.quality/config.toml` with API keys:
 
+The pull-request diff, relevant repository files read by reviewers, and synthesized findings are sent to every configured LLM provider. Use only providers approved for the repository's data classification, and prefer `--local` only as a control on GitHub publishing, not as a control on outbound LLM exposure.
+
 ```toml
 # ~/.quality/config.toml
 [llm]
@@ -142,6 +144,8 @@ setup → route_to_branches (fan-out) → [review_branch × (providers × domain
 
 Each finding is tagged with `domain`, `provider`, `model`, and an opaque `source_id` when recorded. Synthesis may consolidate findings, but published attribution is reconstructed from cited raw sources and conservative equivalents at the same location. The persisted baseline also stores a sorted `domains` list for each finding while retaining the scalar `domain` for older baseline files.
 
+Published inline comments and top-level reviews end with one compact, deterministic `quality/review: [model-a, model-b]` line. Models are deduplicated in first-seen order across review domains. This prefix is reserved: matching text in model-authored summaries and findings is neutralized, and prior inline comments are deduplicated only when a complete attribution is the final non-empty line and the authenticated author matches.
+
 If a reviewer domain fails during a partial outage, findings from that domain's prior baseline are retained in the new baseline until a successful run can reassess them. Local and GitHub baselines remain isolated.
 
 On follow-up review, each branch matches prior findings by domain using a helper that checks both `domains` (new) and `domain` (old). When synthesis consolidates findings across multiple lines, a three-tier attribution fallback ensures the domains list is populated:
@@ -219,5 +223,5 @@ The e2e tests found 11 production defects that the unit suite missed, because th
 ## Related documentation
 
 - [Switchplane README](../../README.md) — Runtime control plane architecture, CLI reference, LLM integration, MCP servers
-- [Provider pool docs](../../README.md#provider-pool) — How to configure multiple LLM providers for fan-out workflows like this one
+- [Provider pool docs](README.md#configuration) — How to configure multiple LLM providers for fan-out workflows like this one
 - [LangGraph docs](https://langchain-ai.github.io/langgraph/) — StateGraph, Send, conditional edges, checkpointing

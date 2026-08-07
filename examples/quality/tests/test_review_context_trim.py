@@ -257,32 +257,138 @@ class TestTrimNeverEmptiesTheConversation:
 
 
 class TestAnchorPlusTailStaysWithinWindow:
-    """The #71 fix pins the anchor UNCONDITIONALLY — the anchor can dwarf the window.
+    """The anchored prompt and retained tool tail share one context-window budget."""
 
-    #71 changed the trim to ``[anchor, *trim_messages(messages[1:], ...)]`` where
-    ``anchor = messages[0]``. That keeps the prompt (good) but the anchor is never
-    itself measured against the window. The reviewer's anchor is the initial prompt,
-    which embeds the PR diff verbatim (prompts.py:172-173 -> ```diff\\n{diff}```).
-    ``gh.get_pr_diff`` (gh.py:401-417) returns the raw diff with no size bound, and
-    the diff is attacker-controlled. A PR whose diff alone exceeds the model's window
-    makes ``run_tool_loop`` invoke the model with anchor+tail far over the limit on the
-    very first turn — the provider rejects it (or bills/latency explodes), so the
-    branch reviews nothing.
+    @pytest.mark.asyncio
+    async def test_structured_anchor_preserves_blocks_or_fails_closed_before_provider(self, monkeypatch):
+        """Budgeting must not silently turn multimodal provider content into JSON text."""
+        from copy import deepcopy
 
-    This probes #71 item (ii): "does the anchor-plus-tail ever still exceed the window
-    pathologically?" It does — the fix bounds the tail but not the anchor.
-    """
+        from langchain_core.messages import AIMessage
+
+        import switchplane.llm as llm_module
+
+        class RecordingLLM:
+            def __init__(self):
+                self.invocations: list[list] = []
+
+            async def ainvoke(self, messages):
+                self.invocations.append(deepcopy(messages))
+                return AIMessage(content="done", tool_calls=[])
+
+        class Ctx:
+            task_id = "t"
+
+            def progress(self, *args, **kwargs):
+                pass
+
+            def stream_flush(self, *args, **kwargs):
+                pass
+
+            def tool_invoke(self, *args, **kwargs):
+                pass
+
+        fitting = [
+            {"type": "text", "text": "Review this screenshot."},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/review.png"}},
+        ]
+        monkeypatch.setattr(llm_module, "context_window", lambda _model: 1_000)
+        fitting_llm = RecordingLLM()
+
+        await llm_module.run_tool_loop(
+            fitting_llm,
+            [{"role": "user", "content": deepcopy(fitting)}],
+            {},
+            Ctx(),
+            "test-model",
+            max_turns=1,
+        )
+
+        assert fitting_llm.invocations[0][0]["content"] == fitting
+        assert isinstance(fitting_llm.invocations[0][0]["content"], list)
+
+        oversized_text = [{"type": "text", "text": "x" * 10_000}]
+        monkeypatch.setattr(llm_module, "context_window", lambda _model: 100)
+        text_llm = RecordingLLM()
+
+        await llm_module.run_tool_loop(
+            text_llm,
+            [{"role": "user", "content": deepcopy(oversized_text)}],
+            {},
+            Ctx(),
+            "test-model",
+            max_turns=1,
+        )
+
+        sent_text_blocks = text_llm.invocations[0][0]["content"]
+        assert isinstance(sent_text_blocks, list)
+        assert sent_text_blocks[0]["type"] == "text"
+        assert len(sent_text_blocks[0]["text"]) < len(oversized_text[0]["text"])
+        assert "truncated" in sent_text_blocks[0]["text"]
+
+        oversized_image = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 10_000}}
+        ]
+        image_llm = RecordingLLM()
+
+        with pytest.raises(
+            ValueError, match=r"(?i)(structured|multimodal|image|content block).*(context|budget|large)"
+        ):
+            await llm_module.run_tool_loop(
+                image_llm,
+                [{"role": "user", "content": oversized_image}],
+                {},
+                Ctx(),
+                "test-model",
+                max_turns=1,
+            )
+
+        assert image_llm.invocations == []
+
+    @pytest.mark.asyncio
+    async def test_oversized_structured_anchor_is_bounded_without_crashing(self, monkeypatch):
+        from langchain_core.messages import AIMessage
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        import switchplane.llm as llm_module
+
+        window = 100
+        monkeypatch.setattr(llm_module, "context_window", lambda _model: window)
+        seen_tokens: list[int] = []
+
+        class RecordingLLM:
+            async def ainvoke(self, messages):
+                seen_tokens.append(count_tokens_approximately(messages))
+                return AIMessage(content="done", tool_calls=[])
+
+        class Ctx:
+            task_id = "t"
+
+            def progress(self, *args, **kwargs):
+                pass
+
+            def stream_flush(self, *args, **kwargs):
+                pass
+
+            def tool_invoke(self, *args, **kwargs):
+                pass
+
+        structured_prompt = [{"type": "text", "text": "x" * 10_000}]
+
+        await llm_module.run_tool_loop(
+            RecordingLLM(),
+            [{"role": "user", "content": structured_prompt}],
+            {},
+            Ctx(),
+            "test-model",
+            max_turns=1,
+        )
+
+        assert seen_tokens and seen_tokens[0] <= window
 
     @pytest.mark.asyncio
     async def test_oversized_diff_prompt_is_not_sent_over_window(self):
-        """A prompt larger than the model window must not be handed to the model whole.
-
-        Drives the real ``run_tool_loop`` with a real model name (gpt-4o, 128k window —
-        llm.py:82) and a single oversized HumanMessage standing in for the initial
-        prompt with a huge embedded diff. The invariant: the message list handed to the
-        model on every turn must fit the model's context window. The current fix pins the
-        anchor without measuring it, so the very first invoke is several times over.
-        """
+        """A prompt larger than the model window is not handed to the model whole."""
         from langchain_core.messages import AIMessage, HumanMessage
 
         from switchplane.llm import context_window, run_tool_loop
@@ -340,8 +446,85 @@ class TestAnchorPlusTailStaysWithinWindow:
         assert not over, (
             f"The model ({model_name}, window={window} tokens) was invoked with "
             f"{over[0]} approx tokens — {over[0] / window:.1f}x the window. "
-            "run_tool_loop pins messages[0] as the anchor without measuring it "
-            "(llm.py:250, 259), so an oversized attacker-controlled diff embedded in the "
-            "prompt (gh.get_pr_diff is unbounded) is sent to the provider whole. Providers "
-            "reject an over-window request, so the branch reviews nothing."
+            "run_tool_loop must budget the anchored prompt and retained tail together. "
+            "Providers reject an over-window request, so the branch reviews nothing."
         )
+
+    @pytest.mark.asyncio
+    async def test_anchor_and_tail_share_one_context_budget(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        import switchplane.llm as llm_module
+
+        window = 100
+        monkeypatch.setattr(llm_module, "context_window", lambda _model: window)
+        seen_tokens: list[int] = []
+
+        class RecordingLLM:
+            def bind_tools(self, tools):
+                return self
+
+            async def ainvoke(self, messages):
+                seen_tokens.append(sum(len(str(message.content)) for message in messages) // 4)
+                return AIMessage(content="done", tool_calls=[])
+
+        class Ctx:
+            task_id = "t"
+
+            def progress(self, *args, **kwargs):
+                pass
+
+            def stream_flush(self, *args, **kwargs):
+                pass
+
+            def tool_invoke(self, *args, **kwargs):
+                pass
+
+        messages = [
+            HumanMessage(content="a" * 240),
+            AIMessage(content="b" * 240, tool_calls=[]),
+        ]
+
+        await llm_module.run_tool_loop(RecordingLLM(), messages, {}, Ctx(), "test-model", max_turns=1)
+
+        assert seen_tokens and seen_tokens[0] <= window
+
+    @pytest.mark.asyncio
+    async def test_window_smaller_than_message_overhead_does_not_send_over_budget(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        import switchplane.llm as llm_module
+
+        window = 1
+        monkeypatch.setattr(llm_module, "context_window", lambda _model: window)
+        seen_tokens: list[int] = []
+
+        class RecordingLLM:
+            async def ainvoke(self, messages):
+                seen_tokens.append(count_tokens_approximately(messages))
+                return AIMessage(content="done", tool_calls=[])
+
+        class Ctx:
+            task_id = "t"
+
+            def progress(self, *args, **kwargs):
+                pass
+
+            def stream_flush(self, *args, **kwargs):
+                pass
+
+            def tool_invoke(self, *args, **kwargs):
+                pass
+
+        with pytest.raises(ValueError, match=r"[Cc]ontext window"):
+            await llm_module.run_tool_loop(
+                RecordingLLM(),
+                [HumanMessage(content="oversized prompt")],
+                {},
+                Ctx(),
+                "test-model",
+                max_turns=1,
+            )
+
+        assert seen_tokens == []

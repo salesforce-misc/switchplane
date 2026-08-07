@@ -644,21 +644,6 @@ async def test_get_pr_diff_host_from_repo_arg(fake_shell):
     assert kwargs["env"]["GH_HOST"] == "git.internal.example.com"
 
 
-async def test_get_pr_head_sha_strips_whitespace(fake_shell, tmp_path):
-    """get_pr_head_sha strips leading/trailing whitespace and sets GH_HOST."""
-    from quality.gh import get_pr_head_sha
-
-    fake_shell.stub(("gh", "pr", "view"), "  deadbeef\n")
-
-    sha = await get_pr_head_sha(fake_shell, "github.com/org/repo", 7)
-    assert sha == "deadbeef"
-    # Assert GH_HOST and -R are passed
-    view_calls = [(c, kw) for m, c, kw in fake_shell.calls if m == "run" and c[:3] == ["gh", "pr", "view"]]
-    assert len(view_calls) == 1
-    _cmd, kwargs = view_calls[0]
-    assert kwargs["env"]["GH_HOST"] == "github.com"
-
-
 async def test_get_pr_author_returns_login(fake_shell, tmp_path):
     """get_pr_author returns the author's login and sets GH_HOST."""
     from quality.gh import get_pr_author

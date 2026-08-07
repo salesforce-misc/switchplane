@@ -5,9 +5,8 @@ is silent and publishes credentials to a potentially public PR. Every test asser
 the *exact* output string, not just `secret not in result` (which passes for a
 function that returns "").
 
-All tests verified against the current implementation to confirm they fail before
-the fix and pass after. The current implementation has three outright leaks and
-two mangling bugs that these tests pin.
+The cases below pin both credential coverage and the ordinary identifiers that
+must remain readable after redaction.
 """
 
 from __future__ import annotations
@@ -17,11 +16,7 @@ class TestSecretRedaction:
     """Tests for redact_secrets — defensive scrubbing of PR content before posting."""
 
     def test_short_labelled_secrets_are_redacted(self):
-        """Secrets under 20 chars must still be redacted (fixes length-floor bug).
-
-        Current impl requires 20+ chars, allowing 12-char keys to leak. This test
-        must fail against current code and pass after lowering the floor.
-        """
+        """Labelled secrets are redacted even when their values are short."""
         from quality._redact import redact_secrets
 
         # 12-char key (realistic for dev/test keys)
@@ -32,12 +27,7 @@ class TestSecretRedaction:
         assert redacted == "api_key=<REDACTED>", f"Short key must be redacted, got: {redacted}"
 
     def test_bare_tokens_with_no_label_are_redacted(self):
-        """Bare tokens with known prefixes must be redacted (fixes no-prefix-matching bug).
-
-        Diffs quote tokens without labels: `sk-ant-abc123...`. Current impl only
-        catches labelled forms, leaking bare tokens. This test must fail against
-        current code.
-        """
+        """Bare tokens with known credential prefixes are redacted."""
         from quality._redact import redact_secrets
 
         # Anthropic key (no label, realistic length)
@@ -80,12 +70,35 @@ class TestSecretRedaction:
         assert "sk-ant-secret123456789012345678901234567" not in redacted_bearer, "Bearer token must be redacted"
         assert "<REDACTED>" in redacted_bearer, f"Redacted bearer must show placeholder, got: {redacted_bearer}"
 
-    def test_credentialed_url_preserves_structure(self):
-        """Credentialed URL https://user:secret@host must redact secret AND preserve structure.
+    def test_common_credential_labels_are_redacted(self):
+        """Common credential labels redact values without relying on token prefixes."""
+        from quality._redact import redact_secrets
 
-        Current impl mangles the URL to `https://user=<REDACTED>host/path`, destroying
-        the structure. This test asserts the EXACT expected output to catch mangling.
-        """
+        cases = {
+            "password: hunter2": "password=<REDACTED>",
+            "client_secret = local-dev-secret": "client_secret=<REDACTED>",
+            "access_token: opaque-value": "access_token=<REDACTED>",
+            "secret-key=keyboard-cat": "secret-key=<REDACTED>",
+        }
+        for raw, expected in cases.items():
+            assert redact_secrets(raw) == expected
+
+    def test_short_generic_sk_identifier_is_not_redacted(self):
+        """Short generic sk-* identifiers remain readable when they are not credential-shaped."""
+        from quality._redact import redact_secrets
+
+        identifier = "Use model alias sk-test in this fixture."
+        assert redact_secrets(identifier) == identifier
+
+    def test_long_generic_sk_token_is_redacted(self):
+        """Long generic sk-* values are treated as credential-shaped and redacted."""
+        from quality._redact import redact_secrets
+
+        token = "sk-abcdefghijklmnopqrstuvwxyz0123456789"
+        assert redact_secrets(f"Request failed for {token}") == "Request failed for sk-<REDACTED>"
+
+    def test_credentialed_url_preserves_structure(self):
+        """Credentialed URLs redact passwords while preserving URL structure."""
         from quality._redact import redact_secrets
 
         url = "Clone failed: https://username:my-secret-password-12345@github.com/org/repo"
@@ -102,11 +115,7 @@ class TestSecretRedaction:
         )
 
     def test_authorization_header_preserves_header_name(self):
-        """Authorization: Bearer must preserve the header name, not eat it entirely.
-
-        Current impl reduces `Authorization: Bearer sk-ant-...` to `<REDACTED>`,
-        destroying the context. This test asserts the header name survives.
-        """
+        """Authorization headers retain their name and scheme after redaction."""
         from quality._redact import redact_secrets
 
         header = "Authorization: Bearer sk-ant-secret123456789012345678901234567"
@@ -211,3 +220,89 @@ class TestSecretRedaction:
         yaml_secret = "api_key: 'sk-ant-def456abc789012345678901234567890'"
         redacted_yaml = redact_secrets(yaml_secret)
         assert "sk-ant-def456abc789012345678901234567890" not in redacted_yaml, "Quoted YAML secret must be redacted"
+
+    def test_quoted_labels_and_values_are_redacted_without_consuming_structure(self):
+        """Quoted JSON, Python, and YAML credentials preserve their closing syntax."""
+        from quality._redact import redact_secrets
+
+        cases = {
+            '{"password": "correct horse battery staple", "enabled": true}': (
+                '{"password": "<REDACTED>", "enabled": true}'
+            ),
+            "{'client-secret': 'local development secret', 'enabled': True}": (
+                "{'client-secret': '<REDACTED>', 'enabled': True}"
+            ),
+            '"secret": "value containing spaces"': '"secret": "<REDACTED>"',
+            "'pwd': 'two words'": "'pwd': '<REDACTED>'",
+            'session: "opaque session value"': 'session: "<REDACTED>"',
+        }
+
+        for raw, expected in cases.items():
+            assert redact_secrets(raw) == expected
+
+    def test_private_key_blocks_are_redacted_without_leaking_key_body(self):
+        """A labelled PEM value is removed through its matching END marker."""
+        from quality._redact import redact_secrets
+
+        raw = (
+            "private_key: |\n"
+            "  -----BEGIN PRIVATE KEY-----\n"
+            "  c2VjcmV0LWtleS1ib2R5LWxpbmUtMQ==\n"
+            "  c2VjcmV0LWtleS1ib2R5LWxpbmUtMg==\n"
+            "  -----END PRIVATE KEY-----\n"
+            "public_name: review-bot"
+        )
+
+        redacted = redact_secrets(raw)
+
+        assert redacted == "private_key=<REDACTED>\npublic_name: review-bot"
+        assert "BEGIN PRIVATE KEY" not in redacted
+        assert "c2VjcmV0" not in redacted
+
+    def test_reference_assignments_and_status_values_are_not_redacted(self):
+        """Obvious references and ordinary session status remain useful context."""
+        from quality._redact import redact_secrets
+
+        references = "password = request.password\napiKey = config.apiKey\nsession: active"
+
+        assert redact_secrets(references) == references
+
+    def test_environment_password_references_are_preserved_complete(self):
+        from quality._redact import redact_secrets
+
+        references = 'password = os.environ["PASSWORD"]\npassword = ${PASSWORD}'
+
+        assert redact_secrets(references) == references
+
+    def test_literal_credentials_still_redact_next_to_reference_assignments(self):
+        """Reference exemptions must not allow adjacent literal credentials through."""
+        from quality._redact import redact_secrets
+
+        raw = (
+            "password = request.password\n"
+            'password = "literal credential"\n'
+            "apiKey = config.apiKey\n"
+            "apiKey = literal-api-key\n"
+            "session: active\n"
+            "session: opaque-session-token"
+        )
+        expected = (
+            "password = request.password\n"
+            'password = "<REDACTED>"\n'
+            "apiKey = config.apiKey\n"
+            "apiKey=<REDACTED>\n"
+            "session: active\n"
+            "session=<REDACTED>"
+        )
+
+        assert redact_secrets(raw) == expected
+
+    def test_dotted_literals_redact_but_credential_references_remain(self):
+        """Dots alone do not make a labelled credential value a code reference."""
+        from quality._redact import redact_secrets
+
+        raw = "token=abc.def.ghi\npassword=hunter2.value\npassword=request.password\napiKey=config.apiKey"
+
+        assert redact_secrets(raw) == (
+            "token=<REDACTED>\npassword=<REDACTED>\npassword=request.password\napiKey=config.apiKey"
+        )

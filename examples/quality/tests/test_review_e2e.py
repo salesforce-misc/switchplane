@@ -126,7 +126,12 @@ class TestGraphExecution:
         from quality.agents.pr import memory as memory_module
 
         monkeypatch.setattr(memory_module, "save_baseline", lambda *args, **kwargs: None, raising=True)
-        monkeypatch.setattr(memory_module, "baseline_path", lambda *args: "/tmp/baseline.json", raising=True)
+        monkeypatch.setattr(
+            memory_module,
+            "baseline_path",
+            lambda root, repo, number, *, local=False: "/tmp/baseline.json",
+            raising=True,
+        )
         monkeypatch.setattr(memory_module, "load_baseline", lambda *args: {"findings": []}, raising=True)
 
         # Stub rate limit module
@@ -315,7 +320,12 @@ class TestGraphExecution:
         from quality import ratelimit as ratelimit_module
 
         monkeypatch.setattr(memory_module, "save_baseline", lambda *a, **kw: None, raising=True)
-        monkeypatch.setattr(memory_module, "baseline_path", lambda *a: "/tmp/baseline.json", raising=True)
+        monkeypatch.setattr(
+            memory_module,
+            "baseline_path",
+            lambda root, repo, number, *, local=False: "/tmp/baseline.json",
+            raising=True,
+        )
         monkeypatch.setattr(memory_module, "load_baseline", lambda *a: {"findings": []}, raising=True)
         monkeypatch.setattr(ratelimit_module, "with_rate_limit_retry", lambda x: x, raising=True)
 

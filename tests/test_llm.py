@@ -233,13 +233,15 @@ class TestBuildLlmGemini:
         _, kwargs = cls.call_args
         assert "google_api_key" not in kwargs
 
-    def test_base_url_not_forwarded(self):
-        """Gemini adapter has no base_url kwarg; build_llm must not pass it."""
+    def test_rejects_base_url(self):
+        """The stock Gemini adapter rejects a base URL rather than silently dropping it."""
         mod, cls = _mock_module("ChatGoogleGenerativeAI")
-        with patch.dict(sys.modules, {"langchain_google_genai": mod}):
+        with (
+            patch.dict(sys.modules, {"langchain_google_genai": mod}),
+            pytest.raises(ValueError, match="base_url"),
+        ):
             build_llm("gemini-2.0-flash", base_url="https://proxy/")
-        _, kwargs = cls.call_args
-        assert "base_url" not in kwargs
+        cls.assert_not_called()
 
     def test_import_error_raises_with_hint(self):
         with (

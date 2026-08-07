@@ -127,6 +127,45 @@ class TestModelOverrideCrossesVendor:
         ctx.llm(model="gpt-4o")
         assert captured_build == [("gpt-4o", "gw-TOKEN", "https://gateway.internal/v1")]
 
+    @pytest.mark.parametrize(
+        ("configured_model", "override_model"),
+        [
+            ("custom-private-model", "gpt-4o"),
+            ("gpt-4o", "custom-private-model"),
+        ],
+        ids=["unknown-to-known", "known-to-unknown"],
+    )
+    def test_no_base_url_rejects_unknown_known_boundary(self, captured_build, configured_model, override_model):
+        ctx = _ctx(
+            {
+                "llm": {
+                    "model": configured_model,
+                    "api_key": "provider-token",
+                    "base_url": None,
+                    "providers": {},
+                }
+            }
+        )
+
+        with pytest.raises(ValueError, match=r"override|model"):
+            ctx.llm(model=override_model)
+        assert captured_build == []
+
+    def test_gateway_allows_custom_model_id_override(self, captured_build):
+        ctx = _ctx(
+            {
+                "llm": {
+                    "model": "custom-model-a",
+                    "api_key": "gw-TOKEN",
+                    "base_url": "https://gateway.internal/v1",
+                    "providers": {},
+                }
+            }
+        )
+
+        ctx.llm(model="custom-model-b")
+        assert captured_build == [("custom-model-b", "gw-TOKEN", "https://gateway.internal/v1")]
+
 
 class TestGatewayCredentialEscapesToPublicEndpoint:
     """The sharpest form of Finding 1, on the config shape the user actually

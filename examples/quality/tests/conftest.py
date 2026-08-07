@@ -191,9 +191,6 @@ def stub_setup_seams(monkeypatch, tmp_path):
     async def _get_pr_diff(shell, repo, pr_number):
         return "diff --git a/test.py b/test.py\n--- a/test.py\n+++ b/test.py\n@@ -1 +1,2 @@\n x = 1\n+y = 2\n"
 
-    async def _get_pr_head_sha(shell, repo, pr_number):
-        return "stub-head-sha"
-
     # Distinct from the authenticated user, so is_self_review stays False by default.
     async def _get_pr_author(shell, repo, pr_number):
         return "pr-author"
@@ -205,7 +202,6 @@ def stub_setup_seams(monkeypatch, tmp_path):
         ("clone_or_update_repo", _clone_or_update_repo),
         ("create_pr_worktree", _create_pr_worktree),
         ("get_pr_diff", _get_pr_diff),
-        ("get_pr_head_sha", _get_pr_head_sha),
         ("get_pr_author", _get_pr_author),
         ("get_authenticated_user", _get_authenticated_user),
     ):

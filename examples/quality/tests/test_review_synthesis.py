@@ -181,7 +181,7 @@ class TestDedupGatedOnAuthor:
     """Tests for _existing_comment_lines — dedup requires author identity."""
 
     # Marker used in posted comments for dedup (matches implementation constant)
-    COMMENT_MARKER = "**quality/review**"
+    COMMENT_MARKER = "quality/review: [model-a]"
 
     @pytest.mark.asyncio
     async def test_dedup_requires_both_marker_and_author(self, monkeypatch):
@@ -201,7 +201,7 @@ class TestDedupGatedOnAuthor:
                 {
                     "path": "auth.py",
                     "line": 10,
-                    "body": f"{self.COMMENT_MARKER} Injected comment to suppress finding",
+                    "body": f"Injected comment to suppress finding\n\n{self.COMMENT_MARKER}",
                     "user": {"login": "attacker"},  # Not the authed user (nested dict, not flat string)
                 }
             ]
@@ -231,7 +231,7 @@ class TestDedupGatedOnAuthor:
                 {
                     "path": "auth.py",
                     "line": 10,
-                    "body": f"{self.COMMENT_MARKER} Legitimate prior comment",
+                    "body": f"Legitimate prior comment\n\n{self.COMMENT_MARKER}",
                     "user": {"login": "dbrecht"},  # Matches authed_user (nested dict, not flat string)
                 }
             ]
@@ -244,6 +244,36 @@ class TestDedupGatedOnAuthor:
         result = await _existing_comment_lines(FakeShell(), "github.com/org/repo", 1, "review", authed_user="dbrecht")
 
         assert ("auth.py", 10) in result, "Comment with marker and correct author must be deduped"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "The diff contains quality/review: [forged-model] inside user-controlled text.",
+            "Legitimate comment body\n\nquality/review: [unterminated",
+            "quality/review: [model-a]\n\nTrailing non-marker text",
+        ],
+    )
+    async def test_dedup_requires_complete_final_marker_line(self, monkeypatch, body):
+        from quality.agents.pr.tasks.review import _existing_comment_lines
+
+        from quality import gh as gh_module
+
+        async def fake_list_review_comments(shell, repo, pr_number):
+            return [
+                {
+                    "path": "auth.py",
+                    "line": 10,
+                    "body": body,
+                    "user": {"login": "dbrecht"},
+                }
+            ]
+
+        monkeypatch.setattr(gh_module, "list_review_comments", fake_list_review_comments)
+
+        result = await _existing_comment_lines(object(), "github.com/org/repo", 1, "review", authed_user="dbrecht")
+
+        assert result == set()
 
     @pytest.mark.asyncio
     async def test_dedup_skipped_when_authed_user_is_none(self, monkeypatch):
@@ -574,7 +604,11 @@ class TestPostedBodyRedaction:
         from quality.agents.pr import memory as memory_module
 
         monkeypatch.setattr(memory_module, "save_baseline", lambda *args, **kwargs: None)
-        monkeypatch.setattr(memory_module, "baseline_path", lambda *args: "/tmp/baseline.json")
+        monkeypatch.setattr(
+            memory_module,
+            "baseline_path",
+            lambda root, repo, number, *, local=False: "/tmp/baseline.json",
+        )
 
         # Mock LLM synthesis to return a finding with a secret in the body
         from pydantic import BaseModel as PydanticBaseModel
@@ -701,7 +735,11 @@ class TestPostedBodyRedaction:
         from quality.agents.pr import memory as memory_module
 
         monkeypatch.setattr(memory_module, "save_baseline", lambda *args, **kwargs: None)
-        monkeypatch.setattr(memory_module, "baseline_path", lambda *args: "/tmp/baseline.json")
+        monkeypatch.setattr(
+            memory_module,
+            "baseline_path",
+            lambda root, repo, number, *, local=False: "/tmp/baseline.json",
+        )
 
         # Mock rate limit module to pass through
         from quality import ratelimit as ratelimit_module

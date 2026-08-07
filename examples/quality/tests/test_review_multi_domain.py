@@ -50,7 +50,7 @@ class TestMultiDomainAttribution:
             persisted_baseline = kwargs
             return root / "baseline.json"
 
-        def fake_baseline_path(root, **kwargs):
+        def fake_baseline_path(root, repo, number, *, local=False):
             return root / "baseline.json"
 
         def fake_load_baseline(path):
