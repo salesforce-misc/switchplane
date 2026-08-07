@@ -122,6 +122,15 @@ class Task(ABC):
     description: str = ""
     mode: Literal["ephemeral", "long_running"] = "ephemeral"
     mcp_servers: ClassVar[list[str]] = []
+
+    providers: ClassVar[list[str]] = []
+    """LLM providers this task expects in `[llm.providers]`, for fail-fast.
+
+    Advisory only: missing names are logged as warnings at startup and do not
+    fail the task. Declaring nothing keeps full access to the pool — this does
+    not restrict what `ctx.llm()` can resolve.
+    """
+
     _ctx: "AgentContext | None" = None
 
     def startup_info(self) -> dict:

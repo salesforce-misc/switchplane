@@ -8,6 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import structlog
 from pydantic import BaseModel
 
 from switchplane._util import deep_merge
@@ -15,8 +16,37 @@ from switchplane._util import deep_merge
 # Backward-compatible alias
 _deep_merge = deep_merge
 
+logger = structlog.get_logger(__name__)
+
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+DEFAULT_PROVIDER = "default"
+"""Name that resolves to the `[llm]` block itself rather than a pool entry."""
+
+
+class ProviderConfig(BaseModel):
+    """One entry in the `[llm.providers]` pool.
+
+    Field-compatible with the provider fields on `LLMConfig`, so the `[llm]`
+    block and a pool entry are structurally interchangeable — `resolve_provider`
+    treats them as one type.
+
+    Unset fields are **not** inherited from `[llm]`: an entry declaring only a
+    `model` resolves with `api_key=None`, exactly as a bare `[llm]` block does.
+    Each entry is meant to be readable in isolation, and inheriting a credential
+    across vendors is the failure mode the pool exists to prevent. To reuse the
+    `[llm]` credential with a different model, pass `model=` to `ctx.llm()`
+    instead of defining an entry.
+    """
+
+    provider: str | None = None
+    """Reserved for explicit provider routing. Unread today — `build_llm` routes
+    on model-name prefix. Present so adding it later is not a schema change."""
+
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str = DEFAULT_MODEL
 
 
 class LLMConfig(BaseModel):
@@ -24,6 +54,9 @@ class LLMConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = DEFAULT_MODEL
+    providers: dict[str, ProviderConfig] = {}
+    """Named alternates, e.g. `[llm.providers.cheap]`. The fields above act as
+    the default provider; see `resolve_provider`."""
 
 
 class LoggingConfig(BaseModel):
@@ -78,7 +111,23 @@ class AppConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     logging: LoggingConfig = LoggingConfig()
     tui: TuiConfig = TuiConfig()
-    agents: dict[str, dict[str, Any]] = {}
+
+
+def _warn_removed_sections(raw: dict[str, Any], path: Path) -> None:
+    """Warn about config sections that are no longer honored.
+
+    `[agents.<name>]` per-agent overrides were removed — the pool
+    (`[llm.providers]`) supersedes their only use, varying models per agent.
+    Unknown sections are ignored by the model, so without this the values would
+    silently stop taking effect.
+    """
+    if "agents" in raw:
+        logger.warning(
+            "config_section_ignored",
+            section="agents",
+            path=str(path),
+            detail="Per-agent overrides were removed; use [llm.providers.<name>] and ctx.llm(<name>).",
+        )
 
 
 def load_config[C: AppConfig](
@@ -99,12 +148,14 @@ def load_config[C: AppConfig](
     if default_config_path and default_config_path.exists():
         with open(default_config_path, "rb") as f:
             app_defaults = tomllib.load(f)
+        _warn_removed_sections(app_defaults, default_config_path)
 
     # Load user config if it exists
     user_config = {}
     if config_path and config_path.exists():
         with open(config_path, "rb") as f:
             user_config = tomllib.load(f)
+        _warn_removed_sections(user_config, config_path)
 
     # Merge: user config overrides app defaults
     if app_defaults and user_config:
@@ -119,6 +170,34 @@ def load_config[C: AppConfig](
         return config_class()
 
 
-def get_agent_config(config: AppConfig, agent_name: str) -> dict[str, Any]:
-    """Get the config section for a specific agent."""
-    return config.agents.get(agent_name, {})
+def resolve_provider(config: dict[str, Any], name: str | None = None) -> ProviderConfig:
+    """Resolve an LLM provider from a delivered config dict.
+
+    Args:
+        config: The config dict as delivered to an agent (``ctx.config``).
+        name: Pool entry name from ``[llm.providers.<name>]``. ``None`` or
+            ``"default"`` resolves to the ``[llm]`` block's own fields, unless a
+            ``[llm.providers.default]`` entry is explicitly defined.
+
+    Unset fields are never filled in from the ``[llm]`` block — the returned
+    config is either the default's fields or a named entry's fields, never a
+    blend of both. See ``ProviderConfig``.
+
+    Raises:
+        KeyError: If *name* is not a configured pool entry.
+    """
+    llm = config.get("llm") or {}
+    pool = llm.get("providers") or {}
+
+    if name is None or name == DEFAULT_PROVIDER:
+        # An explicit [llm.providers.default] wins, letting a user redirect the
+        # default without editing [llm] itself.
+        if DEFAULT_PROVIDER in pool:
+            return ProviderConfig.model_validate(pool[DEFAULT_PROVIDER])
+        return ProviderConfig.model_validate({k: v for k, v in llm.items() if k != "providers"})
+
+    if name not in pool:
+        configured = ", ".join(sorted(pool)) or "none"
+        raise KeyError(f"Unknown LLM provider {name!r}. Configured providers: {configured}")
+
+    return ProviderConfig.model_validate(pool[name])

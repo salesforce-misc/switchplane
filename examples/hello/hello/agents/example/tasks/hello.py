@@ -77,4 +77,5 @@ class HelloTask(Task):
         ctx.progress("Executing: get_user -> say_hello")
         result = await app.ainvoke(initial_state)
 
+        ctx.stream_flush(result["greeting"])
         ctx.complete({"greeting": result["greeting"]})

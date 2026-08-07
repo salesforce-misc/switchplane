@@ -1,0 +1,20 @@
+# The [llm] block is the fallback for a stock install with no pool entries.
+# It is intentionally left without an api_key — supply yours in
+# ~/.quality/config.toml, which deep-merges over these defaults.
+[llm]
+model = "claude-opus-4-8"
+
+# The review fans out across every configured pool entry x every domain.
+# Each entry needs its own api_key in ~/.quality/config.toml; entries without
+# one are skipped with a progress note rather than failing the review.
+[llm.providers.opus]
+model = "claude-opus-4-8"
+
+[llm.providers.gpt]
+model = "gpt-5.5"
+
+[review]
+allowed_hosts = ["github.com"]
+
+[logging]
+level = "WARNING"

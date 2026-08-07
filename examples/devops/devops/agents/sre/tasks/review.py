@@ -1,15 +1,15 @@
-"""Ops review — weekly service health analysis with a single LLM call.
+"""Ops review — weekly service health analysis with two LLM calls.
 
 Demonstrates the core Switchplane thesis: use deterministic code for data
-processing and statistical analysis, reserve LLM calls for the single step
-that genuinely requires judgment — interpreting the results.
+processing and statistical analysis, reserve LLM calls for the steps that
+genuinely require judgment — quick triage and interpretation.
 
 Graph:
 
-    fetch_metrics ──→ analyze ──→ summarize ──→ compile_report
-    (deterministic)   (deterministic)  (LLM)      (deterministic)
+    fetch_metrics ──→ analyze ──→ triage_check ──→ summarize ──→ compile_report
+    (deterministic)   (deterministic)  (cheap LLM)   (full LLM)   (deterministic)
 
-LLM calls: 1
+LLM calls: 2 (triage with cheap model, summary with default model)
 Deterministic nodes: 3
 """
 
@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 
 from switchplane import Task
 from switchplane.agent_runtime import AgentContext
-from switchplane.llm import build_llm
+from switchplane.config import resolve_provider
 
 # -- Mock data generation ------------------------------------------------------
 #
@@ -307,6 +307,10 @@ Respond only with valid JSON, no markdown fences.\
 _ANALYSIS_PROMPT = """\
 Week-over-week production metrics for a web API.
 
+Initial triage (from cheap model):
+{triage_findings}
+
+Full metrics:
 {formatted_data}
 
 Respond with a JSON object with these keys:
@@ -318,8 +322,8 @@ Respond with a JSON object with these keys:
   - "improvements": array of strings — notable positive trends
   - "follow_up_items": array of strings — items warranting further investigation
 
-Focus on operationally meaningful signals. Distinguish between statistical \
-noise and genuine trends.\
+Consider the triage findings when prioritizing. Focus on operationally meaningful \
+signals. Distinguish between statistical noise and genuine trends.\
 """
 
 
@@ -339,12 +343,13 @@ class ReviewState(TypedDict):
     previous: Any  # pd.DataFrame
     analysis: dict | None
     formatted: str
+    triage: str | None
     summary: dict | None
     report: str
 
 
-def _build_graph(llm) -> StateGraph:
-    """Wire the review graph. 3 deterministic nodes, 1 LLM node."""
+def _build_graph(llm, triage_llm) -> StateGraph:
+    """Wire the review graph. 3 deterministic nodes, 2 LLM nodes."""
 
     def fetch_metrics(state: ReviewState) -> dict:
         current, previous = generate_metrics()
@@ -354,8 +359,16 @@ def _build_graph(llm) -> StateGraph:
         result = analyze(state["current"], state["previous"])
         return {"analysis": result, "formatted": format_analysis(result)}
 
+    async def triage_check(state: ReviewState) -> dict:
+        # Quick triage with a cheaper model — identifies if deep analysis is needed
+        # Uses the default [llm] credential with a cheaper model via model= override.
+        # Per spec §8.1: this demonstrates model= reusing the same credential, NOT a pool entry.
+        prompt = f"Quickly scan these metrics and list any immediate red flags:\n\n{state['formatted']}"
+        response = await triage_llm.ainvoke([{"role": "user", "content": prompt}])
+        return {"triage": response.content}
+
     async def summarize(state: ReviewState) -> dict:
-        prompt = _ANALYSIS_PROMPT.format(formatted_data=state["formatted"])
+        prompt = _ANALYSIS_PROMPT.format(triage_findings=state["triage"], formatted_data=state["formatted"])
         response = await llm.ainvoke(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -399,12 +412,14 @@ def _build_graph(llm) -> StateGraph:
     graph = StateGraph(ReviewState)
     graph.add_node("fetch_metrics", fetch_metrics)  # deterministic
     graph.add_node("analyze_metrics", analyze_metrics)  # deterministic
-    graph.add_node("summarize", summarize)  # ← the ONE LLM call
+    graph.add_node("triage_check", triage_check)  # ← cheap LLM triage
+    graph.add_node("summarize", summarize)  # ← full LLM summary
     graph.add_node("compile_report", compile_report)  # deterministic
 
     graph.add_edge(START, "fetch_metrics")
     graph.add_edge("fetch_metrics", "analyze_metrics")
-    graph.add_edge("analyze_metrics", "summarize")
+    graph.add_edge("analyze_metrics", "triage_check")
+    graph.add_edge("triage_check", "summarize")
     graph.add_edge("summarize", "compile_report")
     graph.add_edge("compile_report", END)
 
@@ -419,28 +434,30 @@ class ReviewTask(Task):
     description = "Weekly ops review — service health analysis with mock NewRelic data"
 
     async def run(self, ctx: AgentContext) -> None:
-        llm_config = ctx.config.get("llm", {})
-        api_key = llm_config.get("api_key")
-        if not api_key:
+        provider = resolve_provider(ctx.config)
+        if not provider.api_key:
             ctx.fail("No LLM API key configured. Set llm.api_key in ~/.devops/config.toml")
             return
 
-        model = llm_config.get("model", "claude-sonnet-4-20250514")
-        llm = build_llm(model, api_key, llm_config.get("base_url"))
-
-        ctx.progress(f"Starting ops review (model: {model})")
+        llm = ctx.llm()
+        # Cheap model for triage using the same credential — reuses [llm] api_key and base_url.
+        # This demonstrates model= override without requiring a pool entry or config change.
+        triage_llm = ctx.llm(model="claude-haiku-4-5-20251001")
+        ctx.progress(f"Starting ops review (model: {provider.model})")
         ctx.progress("Generating mock NewRelic metrics (2 weeks, 5-min granularity)...")
 
-        graph = _build_graph(llm).compile()
+        graph = _build_graph(llm, triage_llm).compile()
 
         initial: ReviewState = {
             "current": None,
             "previous": None,
             "analysis": None,
             "formatted": "",
+            "triage": None,
             "summary": None,
             "report": "",
         }
 
         result = await graph.ainvoke(initial)
+        ctx.stream_flush(result["report"])
         ctx.complete(result["report"])
